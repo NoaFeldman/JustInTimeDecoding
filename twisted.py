@@ -1,4 +1,4 @@
-""" Twisted errors in the TQD model. See Fig. 2 in *arXiv reference here* for details."""
+""" Twisted errors in the TQD model. See Fig. 2 in arxiv/2604.02033 for details."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def build_z_correction_matchings_from_x(
     twist_masks=None,
 ) -> dict:
     """Build color-wise pymatching objects for Completing-theLoop heralding strategy for the Z correction.
-     See Sec. IV in *arXiv reference here* for details.   """
+     See Sec. IV in arxiv/2604.02033 for details.   """
     correction_delta = {
         "g": jit_x_correction["g"] ^ global_x_correction["g"],
         "b": jit_x_correction["b"] ^ global_x_correction["b"],
