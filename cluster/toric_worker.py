@@ -43,7 +43,7 @@ import pickle
 import signal
 import tempfile
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -104,6 +104,26 @@ COST_PER_REP_ALL_P: Dict[Tuple[int, int, bool], float] = {
     (7, 3, False): 0.12256, (7, 3, True): 1.11502,
     (7, 4, False): 0.14354, (7, 4, True): 1.65732,
     (7, 5, False): 0.18477, (7, 5, True): 2.34838,
+    # Large-L extension. Plain (heralding=False) values are measured; heralding
+    # values are measured for L in {9,11 (n<=3)} and EXTRAPOLATED (~2.7x per +2
+    # in L) for the rest -- refresh before any large-L heralding run, but they
+    # only affect load balance, never correctness.
+    (9, 2, False): 0.2615, (9, 2, True): 2.2909,
+    (9, 3, False): 0.4124, (9, 3, True): 5.2625,
+    (9, 4, False): 0.5615, (9, 4, True): 9.2019,
+    (9, 5, False): 0.6905, (9, 5, True): 11.2003,
+    (11, 2, False): 0.5350, (11, 2, True): 6.0748,
+    (11, 3, False): 0.7958, (11, 3, True): 14.2867,
+    (11, 4, False): 1.1314, (11, 4, True): 24.4,
+    (11, 5, False): 1.4088, (11, 5, True): 29.7,
+    (13, 2, False): 0.9911, (13, 2, True): 16.4,
+    (13, 3, False): 1.5173, (13, 3, True): 38.6,
+    (13, 4, False): 2.1554, (13, 4, True): 66.0,
+    (13, 5, False): 2.7040, (13, 5, True): 80.0,
+    (15, 2, False): 1.8000, (15, 2, True): 44.0,
+    (15, 3, False): 2.7032, (15, 3, True): 104.0,
+    (15, 4, False): 3.7969, (15, 4, True): 178.0,
+    (15, 5, False): 4.8586, (15, 5, True): 216.0,
 }
 
 # Flag flipped by the signal handler; the rep loop checkpoints and exits on it.
@@ -122,18 +142,22 @@ def herald_tag(heralding: bool) -> str:
 def plan_tasks(
     target_seconds: float = DEFAULT_TARGET_SECONDS,
     reps_per_point: int = REPS_PER_POINT,
+    l_list: Sequence[int] = L_LIST,
+    heralding_options: Sequence[bool] = HERALDING_OPTIONS,
 ) -> List[dict]:
     """Deterministic flat list of chunk tasks, balanced to ~target_seconds each.
 
     Each (L, n, heralding) group is split into ceil(group_cost / target)
     rep-chunks; every task sweeps all 30 p values over its rep sub-range. The
     order is fixed (L, n, heralding, chunk), so task-id -> task is stable across
-    the worker, the local runner and the Slurm array.
+    the worker, the local runner and the Slurm array. l_list / heralding_options
+    select the sweep (defaults reproduce the base L in {3,5,7}, both options);
+    the large-L plain extension passes l_list=(9,11,13,15), heralding=(False,).
     """
     tasks: List[dict] = []
-    for linear_size in L_LIST:
+    for linear_size in l_list:
         for num_layers in N_LIST:
-            for heralding in HERALDING_OPTIONS:
+            for heralding in heralding_options:
                 group_cost = COST_PER_REP_ALL_P[(linear_size, num_layers, heralding)]
                 full_cost = group_cost * reps_per_point
                 num_chunks = max(1, math.ceil(full_cost / target_seconds))
@@ -305,13 +329,34 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint-every", type=int, default=CHECKPOINT_EVERY)
     parser.add_argument(
+        "--L-list",
+        default=None,
+        help="Comma-separated linear sizes to sweep (default: base 3,5,7).",
+    )
+    parser.add_argument(
+        "--options",
+        default="both",
+        choices=["plain", "herald", "both"],
+        help="Accounting options to sweep: plain (do-nothing), herald, or both.",
+    )
+    parser.add_argument(
         "--print-plan",
         action="store_true",
         help="Print the task plan (and the array size to use) and exit.",
     )
     args = parser.parse_args()
 
-    plan = plan_tasks(args.target_seconds)
+    l_list = (
+        tuple(int(part) for part in args.L_list.split(",")) if args.L_list else L_LIST
+    )
+    heralding_options = {
+        "plain": (False,),
+        "herald": (True,),
+        "both": (False, True),
+    }[args.options]
+    plan = plan_tasks(
+        args.target_seconds, l_list=l_list, heralding_options=heralding_options
+    )
     if args.print_plan:
         for index, task in enumerate(plan, start=1):
             print(
