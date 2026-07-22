@@ -22,17 +22,23 @@ try:
     from .toric_collect import build_study_results, aggregate
     from .toric_worker import plan_tasks, run_group_chunk
     from ..multilayer import plot_toric_delegation_study
-except ImportError:
+except ImportError:  # allow: python cluster/toric_local.py from the repo dir
+    import importlib
     import sys
 
-    _pkg_parent = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    _pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _pkg_parent = os.path.dirname(_pkg_dir)
     if _pkg_parent not in sys.path:
         sys.path.insert(0, _pkg_parent)
-    from JustInTimeDecoding.cluster.toric_collect import build_study_results, aggregate
-    from JustInTimeDecoding.cluster.toric_worker import plan_tasks, run_group_chunk
-    from JustInTimeDecoding.multilayer import plot_toric_delegation_study
+    _pkg = os.path.basename(_pkg_dir)
+    _collect = importlib.import_module(f"{_pkg}.cluster.toric_collect")
+    _worker = importlib.import_module(f"{_pkg}.cluster.toric_worker")
+    _multilayer = importlib.import_module(f"{_pkg}.multilayer")
+    build_study_results = _collect.build_study_results
+    aggregate = _collect.aggregate
+    plan_tasks = _worker.plan_tasks
+    run_group_chunk = _worker.run_group_chunk
+    plot_toric_delegation_study = _multilayer.plot_toric_delegation_study
 
 LOCAL_LINEAR_SIZE = 3
 

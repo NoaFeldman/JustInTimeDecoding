@@ -20,12 +20,7 @@ import glob
 import os
 import pickle
 
-COUNTER_KEYS = [
-    "jit_layer_errors",
-    "jit_cumulative_errors",
-    "global_layer_errors",
-    "global_cumulative_errors",
-]
+COUNTER_KEYS = ["jit_errors", "global_errors"]
 
 
 def main() -> None:
@@ -51,32 +46,29 @@ def main() -> None:
             summary[key] = {
                 "boundary": result["boundary"],
                 "probabilities": list(result["probabilities"]),
+                "channels": result.get("channels"),
                 "error_types": result["error_types"],
                 "linear_size": result["linear_size"],
                 "repetitions": 0,
                 "num_chunks": 0,
-                **{counter: [0] * len(result[counter]) for counter in COUNTER_KEYS},
+                **{counter: 0 for counter in COUNTER_KEYS},
             }
         entry = summary[key]
         entry["repetitions"] += result["repetitions"]
         entry["num_chunks"] += 1
         for counter in COUNTER_KEYS:
-            entry[counter] = [
-                total + value for total, value in zip(entry[counter], result[counter])
-            ]
+            entry[counter] += result[counter]
 
     for key in sorted(summary):
         entry = summary[key]
         repetitions = entry["repetitions"]
-        jit_rates = [count / repetitions for count in entry["jit_cumulative_errors"]]
-        global_rates = [count / repetitions for count in entry["global_cumulative_errors"]]
         print(
             f"boundary={entry['boundary']} L={entry['linear_size']} "
             f"p={entry['probabilities']} reps={repetitions} "
             f"chunks={entry['num_chunks']}"
         )
-        print(f"  JIT cumulative logical rates:    {jit_rates}")
-        print(f"  Global cumulative logical rates: {global_rates}")
+        print(f"  JIT logical rate:    {entry['jit_errors'] / repetitions}")
+        print(f"  Global logical rate: {entry['global_errors'] / repetitions}")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "wb") as handle:

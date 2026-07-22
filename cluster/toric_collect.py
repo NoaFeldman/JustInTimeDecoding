@@ -24,18 +24,17 @@ from collections import defaultdict
 
 try:
     from ..multilayer import estimate_threshold, plot_toric_delegation_study
-except ImportError:
+except ImportError:  # allow: python cluster/toric_collect.py from the repo dir
+    import importlib
     import sys
 
-    _pkg_parent = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    _pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _pkg_parent = os.path.dirname(_pkg_dir)
     if _pkg_parent not in sys.path:
         sys.path.insert(0, _pkg_parent)
-    from JustInTimeDecoding.multilayer import (
-        estimate_threshold,
-        plot_toric_delegation_study,
-    )
+    _multilayer = importlib.import_module(f"{os.path.basename(_pkg_dir)}.multilayer")
+    estimate_threshold = _multilayer.estimate_threshold
+    plot_toric_delegation_study = _multilayer.plot_toric_delegation_study
 
 
 def _herald_tag(heralding: bool) -> str:

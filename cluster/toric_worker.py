@@ -55,21 +55,22 @@ try:
         run_multilayer_jit,
         sample_base_noises,
     )
-except ImportError:  # allow: python cluster/toric_worker.py
+except ImportError:  # allow: python cluster/toric_worker.py from the repo dir
+    import importlib
     import sys
 
-    _pkg_parent = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    # Import the sibling modules using the repo directory's actual name as the
+    # package (works whether it is JustInTimeDecoding, JIT_Dihedral, ...).
+    _pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _pkg_parent = os.path.dirname(_pkg_dir)
     if _pkg_parent not in sys.path:
         sys.path.insert(0, _pkg_parent)
-    from JustInTimeDecoding.multilayer import (
-        build_multilayer_context,
-        layer_has_logical_error,
-        make_toric_layer_specs,
-        run_multilayer_jit,
-        sample_base_noises,
-    )
+    _multilayer = importlib.import_module(f"{os.path.basename(_pkg_dir)}.multilayer")
+    build_multilayer_context = _multilayer.build_multilayer_context
+    layer_has_logical_error = _multilayer.layer_has_logical_error
+    make_toric_layer_specs = _multilayer.make_toric_layer_specs
+    run_multilayer_jit = _multilayer.run_multilayer_jit
+    sample_base_noises = _multilayer.sample_base_noises
 
 # --- study grid --------------------------------------------------------------
 L_LIST: Tuple[int, ...] = (3, 5, 7)

@@ -26,21 +26,20 @@ try:
     # Normal case: run as a submodule of the JustInTimeDecoding package.
     from ..multilayer import make_default_layer_specs, run_multilayer_simulation
 except ImportError:
-    # Fallback: run directly (python cluster/multilayer_worker.py). Put the
-    # parent of JustInTimeDecoding on sys.path and use absolute imports.
+    # Fallback: run directly (python cluster/multilayer_worker.py) from the repo
+    # dir. Import the sibling modules using the repo directory's actual name as
+    # the package (works whether it is JustInTimeDecoding, JIT_Dihedral, ...).
+    import importlib
     import os
     import sys
 
-    _pkg_parent = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    _pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _pkg_parent = os.path.dirname(_pkg_dir)
     if _pkg_parent not in sys.path:
         sys.path.insert(0, _pkg_parent)
-
-    from JustInTimeDecoding.multilayer import (
-        make_default_layer_specs,
-        run_multilayer_simulation,
-    )
+    _multilayer = importlib.import_module(f"{os.path.basename(_pkg_dir)}.multilayer")
+    make_default_layer_specs = _multilayer.make_default_layer_specs
+    run_multilayer_simulation = _multilayer.run_multilayer_simulation
 
 
 def parse_probability_entry(entry: str, num_layers: int) -> list[float]:
