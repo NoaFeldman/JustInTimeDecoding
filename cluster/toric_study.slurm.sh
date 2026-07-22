@@ -29,7 +29,7 @@ cd "${SLURM_SUBMIT_DIR}"
 
 # --- adjust to your cluster's environment ------------------------------------
 # module load python/3.11
-# source "$HOME/venvs/jit/bin/activate"
+source ~/venvs/jit/bin/activate
 
 python cluster/toric_worker.py \
     --task-id "${SLURM_ARRAY_TASK_ID}" \
