@@ -1,4 +1,10 @@
-"""Geometry and indexing helpers for the cubic space-time lattice."""
+"""Geometry and indexing helpers for the cubic space-time lattice.
+
+Pure indexing: the time-depth rule, the (x, y, t) -> vertex map and the mask of
+the edges measured in the last time slice. Output-file naming used to live here
+too; it is not geometry, so it moved to the runners (TQD_runner.py for the
+legacy two-layer files, runner.py for the general layered ones).
+"""
 
 from __future__ import annotations
 
@@ -38,19 +44,3 @@ def last_time_step_measurement_edges(
     """
     base = linear_size**2 * (time_depth - 1) * dimensions
     return np.array([base + i * dimensions + dimensions - 1 for i in range(linear_size**2)])
-
-
-def build_result_filename(
-    output_dir: str,
-    boundary: str,
-    px: float,
-    pz: float,
-    linear_size: int,
-    repetitions: int,
-    run_id: int,
-) -> str:
-    """Build the canonical output filename used by legacy scripts."""
-    return (
-        f"{output_dir}/JIT_{boundary}_px_{px}_pz_{pz}_L_{linear_size}"
-        f"_reps_{repetitions}_{run_id}"
-    )

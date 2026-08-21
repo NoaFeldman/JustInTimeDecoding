@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 
-from .runner import run_full_simulation
+from .TQD_runner import run_full_simulation
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run JIT QEC simulation with the legacy argument layout."
+        description="Run the twisted quantum double simulation (legacy argument layout)."
     )
     parser.add_argument("dirname", help="Output directory")
     parser.add_argument("L", type=int, help="Linear lattice size")

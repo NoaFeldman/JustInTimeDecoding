@@ -1,12 +1,13 @@
 """Shareable simulation package for JIT QEC benchmark generation.
 
-This package reorganizes the data-generation logic from run_simulation.py into
-small, documented modules intended for reuse.
+Layout: model-independent machinery (geometry.py, lattice.py, decoder.py,
+runner.py) plus one module per model (twisted.py + TQD_runner.py for the
+twisted quantum double). runner.py is the general layered data generator;
+TQD_runner.py is the original two-layer twisted quantum double driver.
 """
 
 from .geometry import (
     DIMENSIONS,
-    build_result_filename,
     get_time_depth,
     last_time_step_measurement_edges,
     vertex_index,
@@ -15,26 +16,44 @@ from .lattice import (
     build_edge_endpoints,
     build_incidence_matrix,
     build_neighbor_edge_lookup,
-    get_vertex_edges,
-    precompute_twist_masks,
     shift_edges_one_step,
 )
 from .decoder import (
     count_nontrivial_loops,
-    is_logical_error,
+    is_logical_error_z2,
     jit_decode_full,
     jit_decode_step,
+    z2_logical_error,
 )
 from .twisted import (
+    COLORS,
     build_z_correction_matchings_from_x,
+    completing_the_loop_herald,
     generate_twisted_z_errors,
+    get_vertex_edges,
+    make_twisted_layer_specs,
+    precompute_twist_masks,
+    twisted_delegated_errors,
 )
 from .runner import (
+    ChannelSpec,
+    LayerSpec,
+    LayerView,
+    SimulationContext,
+    build_context,
+    build_run_filename,
+    decode_channel,
+    run_layered_simulation,
+    run_physical_error_sweep,
+    run_repetition,
+    sample_physical_errors,
+)
+from .TQD_runner import (
+    build_result_filename,
     run_full_simulation,
     run_x_only_simulation,
 )
 from .multilayer import (
-    LayerSpec,
     MultiLayerContext,
     ParentLayerView,
     build_multilayer_context,
@@ -59,25 +78,40 @@ from .multilayer import (
 
 __all__ = [
     "DIMENSIONS",
-    "build_result_filename",
     "get_time_depth",
     "last_time_step_measurement_edges",
     "vertex_index",
     "build_edge_endpoints",
     "build_incidence_matrix",
     "build_neighbor_edge_lookup",
-    "get_vertex_edges",
-    "precompute_twist_masks",
     "shift_edges_one_step",
     "count_nontrivial_loops",
-    "is_logical_error",
+    "is_logical_error_z2",
     "jit_decode_full",
     "jit_decode_step",
+    "z2_logical_error",
+    "COLORS",
     "build_z_correction_matchings_from_x",
+    "completing_the_loop_herald",
     "generate_twisted_z_errors",
+    "get_vertex_edges",
+    "make_twisted_layer_specs",
+    "precompute_twist_masks",
+    "twisted_delegated_errors",
+    "ChannelSpec",
+    "LayerSpec",
+    "LayerView",
+    "SimulationContext",
+    "build_context",
+    "build_run_filename",
+    "decode_channel",
+    "run_layered_simulation",
+    "run_physical_error_sweep",
+    "run_repetition",
+    "sample_physical_errors",
+    "build_result_filename",
     "run_full_simulation",
     "run_x_only_simulation",
-    "LayerSpec",
     "MultiLayerContext",
     "ParentLayerView",
     "build_multilayer_context",

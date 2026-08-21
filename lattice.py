@@ -1,4 +1,12 @@
-"""Lattice construction helpers for the JIT QEC simulator."""
+"""Cubic space-time lattice construction: incidence matrix and edge lookups.
+
+Model-independent geometry. Everything here depends only on the cubic
+(2+1)-dimensional lattice -- its vertex-edge incidence matrix, the endpoints of
+each edge, and the neighbor-edge lookup -- so it is shared by every quantum
+double model simulated in this package. Model-specific structure (e.g. the
+twist masks and the per-vertex edge masks of the twisted quantum double) lives
+with that model's code, in twisted.py.
+"""
 
 from __future__ import annotations
 
@@ -172,68 +180,3 @@ def build_neighbor_edge_lookup(linear_size: int, time_depth: int) -> dict:
                     vertex_index(xi, yi, (ti - 1) % time_depth, linear_size) * DIMENSIONS + 2
                 ] * int(ti > 0)
     return lookup
-
-
-def precompute_twist_masks(linear_size: int, time_depth: int):
-    """Precompute masks for the vectorized full-twisting path."""
-    all_nodes = np.arange(linear_size**2 * time_depth)
-    edge_time = np.repeat(all_nodes // (linear_size**2), DIMENSIONS)
-    edge_axis = np.tile(np.arange(DIMENSIONS), linear_size**2 * time_depth)
-
-    active_mask = ~((edge_axis == 2) & (edge_time == time_depth - 1))
-    not_last_time = edge_time < time_depth - 1
-    spatial_at_t0 = (edge_axis < 2) & (edge_time == 0)
-    red_backward_mask = active_mask & ~spatial_at_t0
-    return (
-        active_mask.astype(np.uint8),
-        not_last_time.astype(np.uint8),
-        red_backward_mask.astype(np.uint8),
-    )
-
-
-def get_vertex_edges(
-    x_index: int,
-    y_index: int,
-    t_index: int,
-    linear_size: int,
-    time_depth: int,
-    vertex_color: str,
-    x_loops: dict,
-    edge_lookup: dict,
-):
-    """Return color-specific edge masks around a single vertex."""
-    num_edges = linear_size**2 * time_depth * DIMENSIONS
-    colors = ["b", "g", "r"]
-    result = {color: np.zeros(num_edges, dtype=np.uint8) for color in colors if color != vertex_color}
-
-    if vertex_color == "g":
-        node = vertex_index(x_index, y_index, t_index, linear_size)
-        blue_edges = np.zeros(num_edges, dtype=np.uint8)
-        blue_edges[edge_lookup[(node, 1)]] = 1
-        result["b"] ^= blue_edges & x_loops["r"]
-
-        red_edges = np.zeros(num_edges, dtype=np.uint8)
-        red_edges[edge_lookup[(node, -1)]] = 1
-        result["r"] ^= red_edges & x_loops["b"]
-    elif vertex_color == "b":
-        node = vertex_index(x_index, y_index, t_index, linear_size)
-        green_edges = np.zeros(num_edges, dtype=np.uint8)
-        green_edges[edge_lookup[(node, -1)]] = 1
-        result["g"] ^= green_edges & x_loops["r"]
-        if t_index > 0:
-            node2 = vertex_index((x_index - 1) % linear_size, (y_index - 1) % linear_size, t_index - 1, linear_size)
-            red_edges = np.zeros(num_edges, dtype=np.uint8)
-            red_edges[edge_lookup[(node2, 1)]] = 1
-            result["r"] ^= red_edges & x_loops["g"]
-    elif vertex_color == "r":
-        node = vertex_index(x_index, y_index, t_index, linear_size)
-        green_edges = np.zeros(num_edges, dtype=np.uint8)
-        green_edges[edge_lookup[(node, 1)]] = 1
-        result["g"] ^= green_edges & x_loops["b"]
-        if t_index < time_depth - 1:
-            node2 = vertex_index((x_index + 1) % linear_size, (y_index + 1) % linear_size, t_index + 1, linear_size)
-            blue_edges = np.zeros(num_edges, dtype=np.uint8)
-            blue_edges[edge_lookup[(node2, -1)]] = 1
-            result["b"] ^= blue_edges & x_loops["g"]
-
-    return result

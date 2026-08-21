@@ -56,7 +56,7 @@ import numpy as np
 from pymatching import Matching
 from scipy.sparse import csc_matrix
 
-from .decoder import is_logical_error
+from .decoder import is_logical_error_z2
 from .geometry import (
     DIMENSIONS,
     get_time_depth,
@@ -67,9 +67,8 @@ from .lattice import (
     build_edge_endpoints,
     build_incidence_matrix,
     build_neighbor_edge_lookup,
-    precompute_twist_masks,
 )
-from .twisted import generate_twisted_z_errors
+from .twisted import generate_twisted_z_errors, precompute_twist_masks
 
 # Channel keys of the color-code twisted defaults; the pipeline itself is
 # agnostic to the key set (each LayerSpec declares its own channels).
@@ -585,7 +584,7 @@ def layer_has_logical_error(
 ) -> int:
     """Return 1 if any channel of the layer's residual carries a logical error."""
     for channel in spec.channels:
-        if is_logical_error(
+        if is_logical_error_z2(
             residual_by_channel[channel],
             context.linear_size,
             context.time_depth,

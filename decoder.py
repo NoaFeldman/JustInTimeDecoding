@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import Callable, List, Literal
 
 import numpy as np
 from pymatching import Matching
@@ -12,7 +12,7 @@ from scipy.sparse.csgraph import connected_components
 from .geometry import DIMENSIONS
 
 
-def is_logical_error(
+def is_logical_error_z2(
     decoded_edges: np.ndarray,
     linear_size: int,
     time_depth: int,
@@ -20,7 +20,14 @@ def is_logical_error(
     boundary: str = "OBC",
     edge_endpoints: np.ndarray | None = None,
 ) -> int:
-    """Return 1 if decoded edges contain a logical error for the selected channel.
+    """Return 1 if decoded edges contain a logical error of a Z2 channel.
+
+    Model-independent: it only assumes the channel carries a Z2 (mod-2) gauge
+    group on the cubic space-time lattice, so it applies to any quantum double
+    model whose channels are Z2 (the twisted quantum double's b/g/r X and Z
+    channels among them). Channels with a different group need their own check
+    -- see z2_logical_error() for the adapter that binds this one into the
+    per-channel logical-error function the general runner expects.
 
     - Z errors: mod-2 winding parity. The homology class is a Z2 invariant, so an
       even number of parallel nontrivial Z loops is homologically trivial and not
@@ -61,6 +68,35 @@ def is_logical_error(
     raise ValueError(f"Unsupported error_type: {error_type}. Use 'x' or 'z'.")
 
 
+def z2_logical_error(error_type: Literal["x", "z"]) -> Callable[..., int]:
+    """Bind is_logical_error_z2 to one error type, for a runner ChannelSpec.
+
+    The general runner (runner.py) asks each channel for a logical-error
+    function of the signature ``fn(residual, context, channel) -> int``, where
+    the function is chosen by the group representing the channel. This is that
+    function for a Z2 channel: ``z2_logical_error("x")`` is the X-channel check
+    (nontrivial-loop counting) and ``z2_logical_error("z")`` the Z-channel one
+    (mod-2 winding parity).
+
+    ``context`` is duck-typed: any object exposing linear_size, time_depth,
+    boundary and edge_endpoints (runner.SimulationContext does).
+    """
+
+    def check(residual: np.ndarray, context, channel=None) -> int:  # noqa: ANN001
+        return is_logical_error_z2(
+            residual,
+            context.linear_size,
+            context.time_depth,
+            error_type=error_type,
+            boundary=context.boundary,
+            edge_endpoints=context.edge_endpoints,
+        )
+
+    check.__name__ = f"z2_logical_error_{error_type}"
+    check.__doc__ = f"Z2 logical-error check for an {error_type}-type channel."
+    return check
+
+
 def count_nontrivial_loops(
     decoded_edges: np.ndarray,
     linear_size: int,
@@ -70,24 +106,24 @@ def count_nontrivial_loops(
 ) -> int:
     """Count the X-channel nontrivial loops in a decoded residual.
 
-    Where is_logical_error(..., "x") returns only the mod-2 winding parity of
+    Where is_logical_error_z2(..., "x") returns only the mod-2 winding parity of
     the whole residual, this splits the residual cycle into connected components
     and counts how many components are *individually* non-contractible. This
-    recovers the case is_logical_error misses: an even number of parallel
+    recovers the case is_logical_error_z2 misses: an even number of parallel
     logical loops (e.g. two loops that cancel mod 2) forms two disjoint
     non-contractible components, so the count is 2 even though the overall
     winding parity is 0.
 
     The per-component test is the same mod-2 column/row parity used by the X
-    branch of is_logical_error, so the two stay consistent: a count >= 1 always
-    includes every residual is_logical_error(..., "x") flags, plus the
+    branch of is_logical_error_z2, so the two stay consistent: a count >= 1 always
+    includes every residual is_logical_error_z2(..., "x") flags, plus the
     even-loop cases it misses.
 
     Approximation: two logical loops that share a vertex merge into one
     component whose combined winding is even and are then missed. For separated
     loops the count is exact; touching is low-probability. Only the X channel is
     supported -- for Z, an even number of nontrivial loops is genuinely not a
-    logical error, so is_logical_error(..., "z") is already correct.
+    logical error, so is_logical_error_z2(..., "z") is already correct.
 
     edge_endpoints: (num_edges, 2) array of the two vertex ids per edge (-1 in
     a slot for a missing endpoint), as produced by build_edge_endpoints().
@@ -125,7 +161,7 @@ def count_nontrivial_loops(
     edge_comp = labels[ra]
 
     # Per-component mod-2 column (x-edge) / row (y-edge) parity, matching the X
-    # branch of is_logical_error. With flat index e = ((t*L + i)*L + j)*D + d:
+    # branch of is_logical_error_z2. With flat index e = ((t*L + i)*L + j)*D + d:
     # d==0 edges bin by j (second spatial index), d==1 edges by i (first spatial
     # index); d==2 (time) edges do not contribute to spatial winding.
     axis = active % DIMENSIONS
