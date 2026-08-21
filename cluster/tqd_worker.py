@@ -11,18 +11,24 @@ Sweep grid:
                      2.925e-2 in steps of 7.5e-4. The i = 0 point is p_phys = 0:
                      no physical errors at all, so it is deterministic and
                      contributes p_log = 0 exactly.
-    reps/point       = 1000
+    reps/point       = 1_000_000
 
 Everything model-specific comes from twisted.make_twisted_layer_specs(); the
 protocol itself is the general runner (runner.run_repetition), so switching to
 another quantum double model on the cubic lattice is a change of that one call.
 
-The unit of work assigned to an array task is one *chunk* of the 1000
+The unit of work assigned to an array task is one *chunk* of the 10^6
 repetitions of a single (L, heralding) group, evaluated across all 40 p values.
 The four groups differ ~3x in cost, so chunks are allocated in proportion to a
 rough cost table (COST_PER_REP) with plan_tasks(): the plan is deterministic,
 so worker, plan printout and the .slurm.sh array size agree. A stale cost table
 only makes tasks uneven, never wrong.
+
+Scale: 10^6 reps x 40 p x 2 L x 2 options is ~28k core-hours at the (conservative)
+cost table -- about 139 hours per task on a 200-job array, i.e. many wall-clock
+days no matter how it is sliced. A chunk therefore spans *several submissions*:
+each run advances it by its wall budget and checkpoints, and the next submission
+picks it up. --print-status estimates how many submissions are left.
 
 Pairing: the per-rep seed deliberately excludes `heralding`, so the plain and
 heralded runs of a given (L, p, rep) see the *same* physical errors and the
@@ -34,15 +40,19 @@ CHECKPOINT_EVERY reps, on a self-imposed wall-time budget, and on SIGTERM
 (Slurm sends it before the time-limit SIGKILL). The file stores per-p
 completed_reps/errors; on restart the task reloads it and runs only the
 unfinished reps. Writes are atomic (temp file + os.replace). Re-submitting the
-same array therefore drives every chunk to its 1000-rep target without ever
+same array therefore drives every chunk to its 10^6-rep target without ever
 discarding completed work.
 
+Within a chunk the p values are visited round-robin, one repetition at a time,
+so an unfinished chunk holds equally many reps at every p: the curve gets less
+noisy with each submission instead of being exact at small p and empty at large
+p. Reordering is safe because the per-rep seed does not depend on the order.
+
 Knowing when the study is done: --print-status reads the checkpoints and
-reports, per (L, heralding) group and overall, how many of the 1000 reps/point
-are finished. It prints "STUDY COMPLETE" once every task reached its target,
-and otherwise the sbatch --array line that resumes exactly the unfinished ones.
-An expected-to-be-complete run needs no resubmission at all; resubmission only
-matters when tasks were killed by the time limit (or the wall budget).
+reports, per (L, heralding) group and overall, how many of the 10^6 reps/point
+are finished, the core-hours left and roughly how many further submissions that
+implies. It prints "STUDY COMPLETE" once every task reached its target, and
+otherwise the sbatch --array line that resumes exactly the unfinished ones.
 
 Per project policy this file is NOT run automatically; it is launched on the
 cluster by tqd_study.slurm.sh, or manually, e.g.:
@@ -97,13 +107,13 @@ P_VALUES: Tuple[float, ...] = tuple(
 )
 L_LIST: Tuple[int, ...] = (9, 11)
 HERALDING_OPTIONS: Tuple[bool, ...] = (False, True)
-REPS_PER_POINT: int = 1000
+REPS_PER_POINT: int = 1_000_000
 NUM_LAYERS: int = 2
 BOUNDARY: str = "OBC"
 
 # Master entropy for per-rep reseeding; fixed so resumed runs reproduce.
 MASTER_ENTROPY: int = 20260821
-CHECKPOINT_EVERY: int = 25
+CHECKPOINT_EVERY: int = 500
 DEFAULT_NUM_TASKS: int = 200
 
 # Rough seconds per repetition *per p value*, per (L, heralding) group, used
@@ -317,8 +327,19 @@ def _range_end(chunk: str) -> int:
     return int(chunk.split("-")[-1])
 
 
-def print_status(output_dir: str, plan: Sequence[dict]) -> None:
-    """Print how much of the study is finished, and how to finish the rest."""
+def print_status(
+    output_dir: str,
+    plan: Sequence[dict],
+    hours_per_submission: float = 12.0,
+) -> None:
+    """Print how much of the study is finished, and how to finish the rest.
+
+    At 10^6 reps/point a chunk outlives any single job, so the useful question
+    is not "which tasks failed" but "how much is left": this also reports the
+    remaining core-hours and, from the longest remaining task, how many further
+    submissions of `hours_per_submission` each are needed. The estimate uses
+    COST_PER_REP and inherits its accuracy -- treat it as an order of magnitude.
+    """
     progress = task_progress(output_dir, plan)
     unfinished = [entry for entry in progress if not entry["complete"]]
     done_reps = sum(entry["done"] for entry in progress)
@@ -344,12 +365,28 @@ def print_status(output_dir: str, plan: Sequence[dict]) -> None:
 
     print(
         f"\n{len(progress) - len(unfinished)}/{len(progress)} tasks complete, "
-        f"{done_reps}/{target_reps} repetitions "
+        f"{done_reps:,}/{target_reps:,} repetitions "
         f"({100.0 * done_reps / max(target_reps, 1):.1f}%)."
     )
     if not unfinished:
         print("STUDY COMPLETE -- aggregate with cluster/tqd_collect.py.")
         return
+
+    # Seconds left per task, from the cost table; the longest one sets how many
+    # further submissions the array needs (tasks run concurrently).
+    remaining_seconds = []
+    for entry in unfinished:
+        task = entry["task"]
+        per_rep = group_cost(task["linear_size"], task["heralding"], 1) / len(P_VALUES)
+        remaining_seconds.append((entry["target"] - entry["done"]) * per_rep)
+    longest_hours = max(remaining_seconds) / 3600.0
+    submissions = math.ceil(longest_hours / hours_per_submission)
+    print(
+        f"Estimated remaining: {sum(remaining_seconds) / 3600.0:,.0f} core-hours; "
+        f"longest task {longest_hours:,.0f} h -> about {submissions} more "
+        f"submission(s) at {hours_per_submission:g} h each."
+    )
+
     print(f"\n{len(unfinished)} task(s) unfinished:")
     for entry in unfinished[:20]:
         task = entry["task"]
@@ -357,13 +394,13 @@ def print_status(output_dir: str, plan: Sequence[dict]) -> None:
             f"  task {entry['task_id']:>4}  L={task['linear_size']} "
             f"{herald_tag(task['heralding'])} chunk "
             f"{task['chunk_index'] + 1}/{task['num_chunks']}  "
-            f"{entry['done']}/{entry['target']} reps"
+            f"{entry['done']:,}/{entry['target']:,} reps"
         )
     if len(unfinished) > 20:
         print(f"  ... and {len(unfinished) - 20} more")
     array = format_array_ranges([entry["task_id"] for entry in unfinished])
     print(
-        "\nResume just those with:\n"
+        "\nResume with:\n"
         f"    sbatch --array={array} cluster/tqd_study.slurm.sh"
     )
 
@@ -395,16 +432,27 @@ def run_group_chunk(
     start_time = time.perf_counter()
     since_checkpoint = 0
 
-    for p_index, probability in enumerate(P_VALUES):
-        layer_specs = make_twisted_layer_specs(
-            probability, heralded=heralding, num_layers=NUM_LAYERS
-        )
-        while state["completed_reps"][p_index] < reps_target:
+    # Layer specs are cheap dataclasses; build them once per p, outside the loop.
+    specs_by_p = [
+        make_twisted_layer_specs(probability, heralded=heralding, num_layers=NUM_LAYERS)
+        for probability in P_VALUES
+    ]
+
+    # Round-robin over p rather than finishing one p before starting the next.
+    # At 10^6 reps a chunk spans many submissions, and this keeps the *whole*
+    # curve equally sampled at all times: an interrupted chunk yields a usable
+    # (just noisier) p_log(p_phys) curve instead of exact data at small p and
+    # none at large p. The per-rep seed does not depend on the visiting order,
+    # so the samples drawn are the same either way.
+    while min(state["completed_reps"]) < reps_target:
+        for p_index in range(len(P_VALUES)):
+            if state["completed_reps"][p_index] >= reps_target:
+                continue
             rep_within_group = task["rep_start"] + state["completed_reps"][p_index]
             np.random.seed(rep_seed(linear_size, p_index, rep_within_group))
 
-            physical_errors = sample_physical_errors(context, layer_specs)
-            outcome = run_repetition(context, layer_specs, physical_errors)
+            physical_errors = sample_physical_errors(context, specs_by_p[p_index])
+            outcome = run_repetition(context, specs_by_p[p_index], physical_errors)
             state["errors"][p_index] += outcome["logical_error"]
             if outcome["failed_layer"] is not None:
                 state["errors_by_layer"][outcome["failed_layer"]][p_index] += 1
@@ -419,7 +467,11 @@ def run_group_chunk(
                 _atomic_dump(state, path)
                 if verbose:
                     reason = "signal" if _STOP_REQUESTED else "wall-budget"
-                    print(f"[interrupted:{reason}] saved {os.path.basename(path)}")
+                    done = sum(state["completed_reps"])
+                    print(
+                        f"[interrupted:{reason}] saved {os.path.basename(path)} "
+                        f"at {done}/{reps_target * len(P_VALUES)} reps"
+                    )
                 return "interrupted"
             if since_checkpoint >= checkpoint_every:
                 _atomic_dump(state, path)
@@ -440,6 +492,12 @@ def main() -> None:
     parser.add_argument("--output-dir", default="results/tqd")
     parser.add_argument("--num-tasks", type=int, default=DEFAULT_NUM_TASKS)
     parser.add_argument("--reps-per-point", type=int, default=REPS_PER_POINT)
+    parser.add_argument(
+        "--hours-per-submission",
+        type=float,
+        default=12.0,
+        help="Job --time used by --print-status to estimate remaining submissions.",
+    )
     parser.add_argument(
         "--wall-budget",
         type=float,
@@ -499,7 +557,7 @@ def main() -> None:
         return
 
     if args.print_status:
-        print_status(args.output_dir, plan)
+        print_status(args.output_dir, plan, args.hours_per_submission)
         return
 
     if args.task_id is None:
