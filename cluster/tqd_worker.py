@@ -7,7 +7,10 @@ Sweep grid:
     L (linear_size)  in {9, 11}
     heralding        in {False (plain), True (Completing-the-Loop)}
     p_phys           40 points, p_i = P_MIN + (P_MAX - P_MIN)/STEP_NUM * i
-                     with P_MIN = 1.5e-2, P_MAX = 4e-2, STEP_NUM = 40
+                     with P_MIN = 0, P_MAX = 3e-2, STEP_NUM = 40, i.e. 0 to
+                     2.925e-2 in steps of 7.5e-4. The i = 0 point is p_phys = 0:
+                     no physical errors at all, so it is deterministic and
+                     contributes p_log = 0 exactly.
     reps/point       = 1000
 
 Everything model-specific comes from twisted.make_twisted_layer_specs(); the
@@ -86,8 +89,8 @@ except ImportError:  # allow: python cluster/tqd_worker.py from the repo dir
 
 # --- study grid --------------------------------------------------------------
 MODEL: str = "tqd"
-P_MIN: float = 1.5e-2
-P_MAX: float = 4.0e-2
+P_MIN: float = 0.0
+P_MAX: float = 3.0e-2
 STEP_NUM: int = 40
 P_VALUES: Tuple[float, ...] = tuple(
     P_MIN + (P_MAX - P_MIN) / STEP_NUM * index for index in range(STEP_NUM)
@@ -107,7 +110,9 @@ DEFAULT_NUM_TASKS: int = 200
 # only to balance the chunk allocation across array tasks. These are estimates
 # (JIT layer: 3 colors x L_t time steps x 2 MWPM decodes; heralding adds one
 # weighted Matching rebuild per color and repetition); refresh them from the
-# per-task timings printed by a first run if the load looks uneven.
+# per-task timings printed by a first run if the load looks uneven. They were
+# estimated for the 1.5e-2..4e-2 range and are therefore conservative for the
+# current 0..3e-2 one -- fewer defects decode faster, so tasks finish early.
 COST_PER_REP: Dict[Tuple[int, bool], float] = {
     (9, False): 0.35,
     (9, True): 0.45,

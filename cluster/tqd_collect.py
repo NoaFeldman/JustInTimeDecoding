@@ -134,45 +134,82 @@ def print_summary(summary: Dict[Tuple[int, bool], dict]) -> None:
             )
 
 
-def plot(summary: Dict[Tuple[int, bool], dict], output_path: str) -> None:
-    """Plot p_log vs p_phys, one curve per (L, heralding)."""
+def plot(
+    summary: Dict[Tuple[int, bool], dict],
+    output_path: str,
+    yscale: str = "log",
+) -> None:
+    """Plot p_log vs p_phys, one curve per (L, heralding).
+
+    Color encodes the accounting option (plain vs heralded), which is the
+    comparison the study is about; the lattice size is the marker and the line
+    style. Sizes beyond the four tabulated styles cycle through them again.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    colors = {9: "tab:blue", 11: "tab:red"}
-    styles = {False: ("o-", "plain"), True: ("s--", "heralded")}
+    herald_colors = {False: "tab:blue", True: "tab:red"}
+    herald_labels = {False: "plain", True: "heralded"}
+    size_styles = [("o", "-"), ("s", "--"), ("^", ":"), ("D", "-.")]
+    sizes = sorted({key[0] for key in summary})
 
     figure, axis = plt.subplots(figsize=(7.0, 5.0))
-    for key in sorted(summary, key=lambda k: (k[0], k[1])):
+    # Legend grouped by accounting option, matching the color encoding.
+    for key in sorted(summary, key=lambda k: (k[1], k[0])):
         entry = summary[key]
         linear_size, heralding = key
-        marker, herald_label = styles[heralding]
-        probabilities = entry["probabilities"]
-        rates = entry["logical_error_rates"]
-        lower = [
-            max(rate - low, 0.0) for rate, low in zip(rates, entry["ci_low"])
-        ]
-        upper = [
-            max(high - rate, 0.0) for rate, high in zip(rates, entry["ci_high"])
-        ]
+        marker, line_style = size_styles[sizes.index(linear_size) % len(size_styles)]
+        herald_label = herald_labels[heralding]
+        points = list(
+            zip(
+                entry["probabilities"],
+                entry["logical_error_rates"],
+                entry["ci_low"],
+                entry["ci_high"],
+            )
+        )
+        # A log axis has no room for p_log = 0 (the sweep starts at p_phys = 0,
+        # and low-p points often see no error in 1000 reps). Drawing them at
+        # y = 0 leaves a bar hanging off the bottom with no marker, which reads
+        # as an artifact; they are one-sided measurements, so draw them as
+        # 95% upper limits instead -- an arrow at the Wilson upper bound.
+        as_limits = yscale == "log"
+        drawn = [point for point in points if not (as_limits and point[1] <= 0.0)]
+        limits = [point for point in points if as_limits and point[1] <= 0.0]
+
         axis.errorbar(
-            probabilities,
-            rates,
-            yerr=[lower, upper],
-            fmt=marker,
+            [point[0] for point in drawn],
+            [point[1] for point in drawn],
+            yerr=[
+                [max(point[1] - point[2], 0.0) for point in drawn],
+                [max(point[3] - point[1], 0.0) for point in drawn],
+            ],
+            marker=marker,
+            linestyle=line_style,
             markersize=4,
             linewidth=1.2,
             capsize=2,
-            color=colors.get(linear_size),
-            alpha=0.85 if heralding else 1.0,
-            label=f"L = {linear_size}, {herald_label}",
+            color=herald_colors[heralding],
+            label=f"{herald_label}, L = {linear_size}",
         )
+        if limits:
+            bounds = [point[3] for point in limits]
+            axis.errorbar(
+                [point[0] for point in limits],
+                bounds,
+                yerr=[[bound * 0.5 for bound in bounds], [0.0] * len(bounds)],
+                uplims=True,
+                linestyle="none",
+                linewidth=1.0,
+                color=herald_colors[heralding],
+                alpha=0.6,
+            )
 
     axis.set_xlabel(r"physical error rate $p_{\mathrm{phys}}$")
     axis.set_ylabel(r"logical error rate $p_{\mathrm{log}}$")
-    axis.set_yscale("log")
+    axis.set_yscale(yscale)
     axis.set_title("Twisted quantum double, 2 layers: JIT logical error rate")
     axis.grid(True, which="both", alpha=0.3)
     axis.legend()
@@ -181,6 +218,22 @@ def plot(summary: Dict[Tuple[int, bool], dict], output_path: str) -> None:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     figure.savefig(output_path, dpi=200)
     print(f"\nSaved plot to {output_path}.")
+
+    # A log axis cannot show p_log = 0, and the sweep now starts at p_phys = 0,
+    # where p_log is exactly 0 -- say so rather than let points vanish quietly.
+    if yscale == "log":
+        zeros = sum(
+            1
+            for entry in summary.values()
+            for rate in entry["logical_error_rates"]
+            if rate == 0.0
+        )
+        if zeros:
+            print(
+                f"Note: {zeros} point(s) observed no logical error; on the log "
+                "axis they are drawn as 95% upper limits (downward arrows). "
+                "Use --yscale linear (or symlog) to place them at 0 instead."
+            )
 
 
 def write_csv(summary: Dict[Tuple[int, bool], dict], path: str) -> None:
@@ -206,6 +259,12 @@ def main() -> None:
     parser.add_argument("--csv", default="results/tqd/tqd_plog_vs_pphys.csv")
     parser.add_argument("--plot", default="results/tqd/tqd_plog_vs_pphys.pdf")
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--yscale",
+        default="log",
+        choices=["log", "linear", "symlog"],
+        help="y-axis scale of the plot; log cannot show the p_log = 0 points.",
+    )
     args = parser.parse_args()
 
     summary = collect(args.results_dir)
@@ -218,7 +277,7 @@ def main() -> None:
 
     write_csv(summary, args.csv)
     if not args.no_plot:
-        plot(summary, args.plot)
+        plot(summary, args.plot, yscale=args.yscale)
 
 
 if __name__ == "__main__":

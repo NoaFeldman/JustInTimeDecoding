@@ -1,7 +1,7 @@
 #!/bin/bash
 # Twisted quantum double p_log(p_phys) study:
 #   L in {9, 11}, heralding in {plain, Completing-the-Loop},
-#   p_phys = 1.5e-2 + (4e-2 - 1.5e-2)/40 * i, i = 0..39,   1000 reps/point.
+#   p_phys = (3e-2/40) * i, i = 0..39  (0 .. 2.925e-2),    1000 reps/point.
 #
 # The array size is the plan of plan_tasks(num_tasks=200) in tqd_worker.py:
 # 195 cost-balanced chunk-tasks of roughly 8 minutes each on the reference
