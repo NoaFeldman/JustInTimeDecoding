@@ -27,6 +27,10 @@ OUTPUT_DIR="${SLURM_SUBMIT_DIR}/results/toric"
 mkdir -p "${OUTPUT_DIR}" "${SLURM_SUBMIT_DIR}/logs"
 cd "${SLURM_SUBMIT_DIR}"
 
+# Home may be read-only on compute nodes: give matplotlib a writable cache.
+export MPLCONFIGDIR="${SLURM_SUBMIT_DIR}/.mplcache"
+mkdir -p "${MPLCONFIGDIR}"
+
 # --- adjust to your cluster's environment ------------------------------------
 # module load python/3.11
 source ~/venvs/jit/bin/activate

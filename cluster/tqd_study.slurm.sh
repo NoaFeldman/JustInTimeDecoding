@@ -11,8 +11,10 @@
 #
 # Resumable: every task checkpoints its own result file every 25 reps and on
 # SIGTERM. If a task is killed at the --time limit, the reps it finished are
-# saved; just re-submit this script and each chunk continues where it stopped
-# (finished chunks are no-ops). Re-submit until every task reports complete.
+# saved, and re-running that task continues where it stopped. To see what is
+# left (and get the sbatch line that resumes only the unfinished tasks):
+#     python cluster/tqd_worker.py --print-status --output-dir results/tqd
+# It prints STUDY COMPLETE when all 195 tasks reached 1000 reps at every p.
 #
 #SBATCH --job-name=tqd_jit
 #SBATCH --array=1-195

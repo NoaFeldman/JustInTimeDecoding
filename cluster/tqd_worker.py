@@ -34,6 +34,13 @@ unfinished reps. Writes are atomic (temp file + os.replace). Re-submitting the
 same array therefore drives every chunk to its 1000-rep target without ever
 discarding completed work.
 
+Knowing when the study is done: --print-status reads the checkpoints and
+reports, per (L, heralding) group and overall, how many of the 1000 reps/point
+are finished. It prints "STUDY COMPLETE" once every task reached its target,
+and otherwise the sbatch --array line that resumes exactly the unfinished ones.
+An expected-to-be-complete run needs no resubmission at all; resubmission only
+matters when tasks were killed by the time limit (or the wall budget).
+
 Per project policy this file is NOT run automatically; it is launched on the
 cluster by tqd_study.slurm.sh, or manually, e.g.:
 
@@ -254,6 +261,108 @@ def _load_or_init(path: str, task: dict) -> dict:
     }
 
 
+def task_progress(output_dir: str, plan: Sequence[dict]) -> List[dict]:
+    """Reps done vs reps targeted for every task of the plan, from its checkpoint.
+
+    The checkpoints are the authority on what is finished: a task is complete
+    when every one of its 40 p values reached the chunk's rep target. A missing
+    file means the task never ran (or was killed before its first checkpoint).
+    """
+    progress = []
+    for index, task in enumerate(plan, start=1):
+        target = (task["rep_stop"] - task["rep_start"]) * len(P_VALUES)
+        path = checkpoint_path(output_dir, task)
+        done = 0
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as handle:
+                    state = pickle.load(handle)
+            except (EOFError, pickle.UnpicklingError):
+                state = None
+            if state is not None and state.get("rep_start") == task["rep_start"]:
+                done = sum(state["completed_reps"])
+        progress.append(
+            {
+                "task_id": index,
+                "task": task,
+                "done": done,
+                "target": target,
+                "complete": done >= target,
+            }
+        )
+    return progress
+
+
+def format_array_ranges(task_ids: Sequence[int]) -> str:
+    """Compact Slurm --array list, e.g. [1,2,3,7,9,10] -> '1-3,7,9-10'."""
+    ranges: List[str] = []
+    for task_id in sorted(task_ids):
+        if ranges and task_id == _range_end(ranges[-1]) + 1:
+            ranges[-1] = f"{_range_start(ranges[-1])}-{task_id}"
+        else:
+            ranges.append(str(task_id))
+    return ",".join(ranges)
+
+
+def _range_start(chunk: str) -> int:
+    return int(chunk.split("-")[0])
+
+
+def _range_end(chunk: str) -> int:
+    return int(chunk.split("-")[-1])
+
+
+def print_status(output_dir: str, plan: Sequence[dict]) -> None:
+    """Print how much of the study is finished, and how to finish the rest."""
+    progress = task_progress(output_dir, plan)
+    unfinished = [entry for entry in progress if not entry["complete"]]
+    done_reps = sum(entry["done"] for entry in progress)
+    target_reps = sum(entry["target"] for entry in progress)
+
+    for key in [(size, herald) for size in L_LIST for herald in HERALDING_OPTIONS]:
+        group = [
+            entry
+            for entry in progress
+            if (entry["task"]["linear_size"], entry["task"]["heralding"]) == key
+        ]
+        if not group:
+            continue
+        group_done = sum(entry["done"] for entry in group)
+        group_target = sum(entry["target"] for entry in group)
+        complete = sum(entry["complete"] for entry in group)
+        print(
+            f"L={key[0]:<3} {herald_tag(key[1]):<7} "
+            f"tasks {complete:>4}/{len(group):<4} "
+            f"reps {group_done:>7}/{group_target:<7} "
+            f"({100.0 * group_done / max(group_target, 1):5.1f}%)"
+        )
+
+    print(
+        f"\n{len(progress) - len(unfinished)}/{len(progress)} tasks complete, "
+        f"{done_reps}/{target_reps} repetitions "
+        f"({100.0 * done_reps / max(target_reps, 1):.1f}%)."
+    )
+    if not unfinished:
+        print("STUDY COMPLETE -- aggregate with cluster/tqd_collect.py.")
+        return
+    print(f"\n{len(unfinished)} task(s) unfinished:")
+    for entry in unfinished[:20]:
+        task = entry["task"]
+        print(
+            f"  task {entry['task_id']:>4}  L={task['linear_size']} "
+            f"{herald_tag(task['heralding'])} chunk "
+            f"{task['chunk_index'] + 1}/{task['num_chunks']}  "
+            f"{entry['done']}/{entry['target']} reps"
+        )
+    if len(unfinished) > 20:
+        print(f"  ... and {len(unfinished) - 20} more")
+    array = format_array_ranges([entry["task_id"] for entry in unfinished])
+    print(
+        "\nResume just those with:\n"
+        f"    sbatch --array={array} cluster/tqd_study.slurm.sh"
+    )
+
+
 def run_group_chunk(
     task: dict,
     output_dir: str,
@@ -347,6 +456,14 @@ def main() -> None:
         action="store_true",
         help="Print the task plan (and the array size to use) and exit.",
     )
+    parser.add_argument(
+        "--print-status",
+        action="store_true",
+        help=(
+            "Report how many repetitions of --output-dir are done, list the "
+            "unfinished tasks and the sbatch --array line that resumes them."
+        ),
+    )
     args = parser.parse_args()
 
     l_list = tuple(int(part) for part in args.L_list.split(",")) if args.L_list else L_LIST
@@ -376,8 +493,12 @@ def main() -> None:
         print(f"\n# {len(plan)} tasks -> use  #SBATCH --array=1-{len(plan)}")
         return
 
+    if args.print_status:
+        print_status(args.output_dir, plan)
+        return
+
     if args.task_id is None:
-        raise SystemExit("Provide --task-id (or use --print-plan).")
+        raise SystemExit("Provide --task-id (or use --print-plan / --print-status).")
     if not 1 <= args.task_id <= len(plan):
         # Extra array indices (e.g. a padded --array) are harmless no-ops.
         print(f"task-id {args.task_id} > plan size {len(plan)}; nothing to do.")
