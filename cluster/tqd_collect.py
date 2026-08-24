@@ -3,8 +3,9 @@
 Reads the TQD_*.pkl chunk checkpoints written by tqd_worker.py, sums the
 repetitions and logical errors of every chunk of a (L, heralding) group at each
 of the 40 physical error rates, prints a table, saves the aggregated summary,
-and plots the logical error rate against the physical error rate: one curve per
-(L, heralding), with Wilson 95% confidence intervals.
+and plots the logical error rate against the physical error rate on linear
+axes: one curve per (L, heralding), with Wilson 95% confidence intervals
+(--yscale log for the small-p tail).
 
 Chunks are summed, never averaged: every repetition of a group is an
 independent sample of the same (L, heralding, p) point, so
@@ -137,9 +138,14 @@ def print_summary(summary: Dict[Tuple[int, bool], dict]) -> None:
 def plot(
     summary: Dict[Tuple[int, bool], dict],
     output_path: str,
-    yscale: str = "log",
+    yscale: str = "linear",
 ) -> None:
     """Plot p_log vs p_phys, one curve per (L, heralding).
+
+    Both axes are linear by default, so the p_phys = 0 point and every other
+    zero-error point sit on the axis where they belong. Pass yscale="log" to
+    resolve the small-p tail instead; there p_log = 0 cannot be drawn, so those
+    points become 95% upper limits (see below).
 
     Color encodes the accounting option (plain vs heralded), which is the
     comparison the study is about; the lattice size is the marker and the line
@@ -170,11 +176,11 @@ def plot(
                 entry["ci_high"],
             )
         )
-        # A log axis has no room for p_log = 0 (the sweep starts at p_phys = 0,
-        # and low-p points often see no error in 1000 reps). Drawing them at
-        # y = 0 leaves a bar hanging off the bottom with no marker, which reads
-        # as an artifact; they are one-sided measurements, so draw them as
-        # 95% upper limits instead -- an arrow at the Wilson upper bound.
+        # On a linear axis p_log = 0 is an ordinary point. On a log axis it
+        # cannot be drawn at all (and the sweep starts at p_phys = 0, where it
+        # is exact), leaving a bar hanging off the bottom with no marker; those
+        # are one-sided measurements, so draw them as 95% upper limits instead
+        # -- an arrow at the Wilson upper bound.
         as_limits = yscale == "log"
         drawn = [point for point in points if not (as_limits and point[1] <= 0.0)]
         limits = [point for point in points if as_limits and point[1] <= 0.0]
@@ -219,8 +225,8 @@ def plot(
     figure.savefig(output_path, dpi=200)
     print(f"\nSaved plot to {output_path}.")
 
-    # A log axis cannot show p_log = 0, and the sweep now starts at p_phys = 0,
-    # where p_log is exactly 0 -- say so rather than let points vanish quietly.
+    # Only relevant on a log axis, which cannot show p_log = 0 -- say so rather
+    # than let those points vanish quietly.
     if yscale == "log":
         zeros = sum(
             1
@@ -261,9 +267,12 @@ def main() -> None:
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument(
         "--yscale",
-        default="log",
-        choices=["log", "linear", "symlog"],
-        help="y-axis scale of the plot; log cannot show the p_log = 0 points.",
+        default="linear",
+        choices=["linear", "log", "symlog"],
+        help=(
+            "y-axis scale of the plot (default linear); log resolves the "
+            "small-p tail but cannot show the p_log = 0 points."
+        ),
     )
     args = parser.parse_args()
 
