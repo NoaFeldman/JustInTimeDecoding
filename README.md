@@ -111,27 +111,85 @@ multi-layer pipeline has its own, `multilayer.LayerSpec`.
 ## Twisted quantum double: p_log vs p_phys study
 
 Grid: `L in {9, 11}`, heralding in {plain, Completing-the-Loop},
-`p_phys = 1.5e-2 + (4e-2 - 1.5e-2)/40 * i` for `i = 0..39`, 1000 reps/point,
-two layers with three Z2 channels each. The plain and heralded curves are
-computed on the *same* noise realizations (the per-rep seed excludes the
-heralding flag), so their difference is a paired comparison.
+`p_phys = 0 + (3e-2 - 0)/40 * i` for `i = 0..39` (0 to 2.925e-2 in steps of
+7.5e-4), 10^6 reps/point, two layers with three Z2 channels each. The plain and
+heralded curves are computed on the *same* noise realizations (the per-rep seed
+excludes the heralding flag), so their difference is a paired comparison — and
+the plot colors those two accounting options, distinguishing L by marker and
+line style.
 
 - cluster/tqd_worker.py: resumable array worker; one task = one rep-chunk of one
   (L, heralding) group across all 40 p values (`--print-plan` for the task list).
 - cluster/tqd_collect.py: sums the chunks, prints the table, writes a CSV and a
-  summary pickle, and plots p_log vs p_phys with Wilson 95% intervals.
-- cluster/tqd_study.slurm.sh: 195-task array driver.
+  summary pickle, and plots p_log vs p_phys on linear axes with Wilson 95%
+  intervals (`--yscale log` for the small-p tail).
+- cluster/tqd_study.slurm.sh: 200-task array driver (12 h per submission).
+
+Scale: 10^6 reps/point is ~28k core-hours (~139 h per task on a 200-job
+array), so no single job finishes a chunk. Each submission advances every
+chunk by its wall budget and checkpoints; the study takes roughly a dozen
+submissions. Because the p values are sampled round-robin, the partial data
+is a complete curve at lower statistics rather than a half-empty one, so it
+is worth collecting and plotting between submissions.
 
 ```bash
 sbatch cluster/tqd_study.slurm.sh
 ```
 
-Re-submit until every task reports complete (chunks resume from their
-checkpoints), then aggregate and plot:
+Check what is finished — the checkpoints, not the queue, are the authority:
+
+```bash
+python cluster/tqd_worker.py --print-status --output-dir results/tqd
+```
+
+It prints the completed fraction per (L, heralding) group, the core-hours
+left with a submission-count estimate, and either `STUDY COMPLETE` or the
+`sbatch --array=...` line that resumes the unfinished tasks. Aggregate and
+plot at any point:
 
 ```bash
 python cluster/tqd_collect.py --results-dir results/tqd
 ```
+
+### Same study, constant-speed commit
+
+The parallel run of the study above with the *only* difference being the JIT
+commit rule: `decoder.constant_speed_commit` instead of
+`decoder.classic_commit`. Same grid, same 200-task plan, same per-rep seeds —
+it is the same `cluster/tqd_worker.py`, invoked with `--commit constant-speed`
+and its own output directory — so the two curves are a paired comparison of the
+commit rule alone.
+
+```bash
+bash cluster/tqd_cs_submit.sh          # array + collect/plot in one go
+```
+
+That submits `cluster/tqd_cs_study.slurm.sh` (200-task array, results into
+`results/tqd_cs`) and then `cluster/tqd_cs_collect.slurm.sh` with
+`--dependency=afterok` on it, so the table, CSV and both figures
+(`tqd_cs_plog_vs_pphys_linear.pdf`, `..._log.pdf`) are regenerated as soon as
+the submission ends. Progress and resume, as for the classic study:
+
+```bash
+python cluster/tqd_worker.py --print-status \
+    --output-dir results/tqd_cs --commit constant-speed
+bash cluster/tqd_cs_submit.sh 7,19-42   # resume the ids it prints
+```
+
+Two things to keep in mind when reading the result:
+
+- `constant_speed_commit` raises `decoder.CommitRejected` on a proposal it is
+  not defined on — a time-like cluster that does not end on a defect in its
+  future-most slice. The worker tallies those repetitions per p, skips them (a
+  deterministic reseed would only refuse them again) and the collector drops
+  them from the `p_log` denominator, printing the rate; `--rejected-as-errors`
+  gives the conservative bound instead. Measured over 4,800 repetitions across
+  both L, both heralding options and p up to 2.925e-2 the rate is **zero**, so a
+  nonzero `rejected` column is worth investigating rather than expected
+  attrition.
+- `results/tqd/tqd_plog_vs_pphys_linear.pdf` was collected at 783,042 of the
+  10^6 reps/point, so stop re-submitting at a comparable fraction to match its
+  statistics (or run to 10^6 for a sharper curve).
 
 ## Multi-layer JIT
 

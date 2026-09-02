@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Callable, List, Literal
 
 import numpy as np
 from pymatching import Matching
-from scipy.sparse import coo_matrix, csc_matrix
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse import csc_matrix
 
 from .geometry import DIMENSIONS
+from .lattice import cluster_edge_indices, cluster_ends, edge_clusters
 
 
 def is_logical_error_z2(
@@ -133,32 +134,13 @@ def count_nontrivial_loops(
             f"count_nontrivial_loops only supports error_type='x', got {error_type!r}."
         )
 
-    active = np.flatnonzero(decoded_edges)
-    if active.size == 0:
+    # Connected components of the residual cycle: two active edges belong to the
+    # same component when they share a vertex.
+    n_comp, labels = edge_clusters(decoded_edges, edge_endpoints)
+    if n_comp == 0:
         return 0
-
-    # Endpoints of each active edge; collapse single-endpoint edges onto their
-    # one vertex and drop any edge with no endpoints (degenerate, never part of
-    # a spatial loop).
-    a = edge_endpoints[active, 0].copy()
-    b = edge_endpoints[active, 1].copy()
-    a = np.where(a < 0, b, a)
-    b = np.where(b < 0, a, b)
-    keep = a >= 0
-    a, b, active = a[keep], b[keep], active[keep]
-    if active.size == 0:
-        return 0
-
-    # Connected components of the residual cycle, via its vertex graph: each
-    # active edge connects its two endpoints.
-    verts = np.unique(np.concatenate([a, b]))
-    ra = np.searchsorted(verts, a)
-    rb = np.searchsorted(verts, b)
-    graph = coo_matrix(
-        (np.ones(ra.size), (ra, rb)), shape=(verts.size, verts.size)
-    )
-    n_comp, labels = connected_components(graph, directed=False)
-    edge_comp = labels[ra]
+    active = np.flatnonzero(labels >= 0)
+    edge_comp = labels[active]
 
     # Per-component mod-2 column (x-edge) / row (y-edge) parity, matching the X
     # branch of is_logical_error_z2. With flat index e = ((t*L + i)*L + j)*D + d:
@@ -181,6 +163,159 @@ def count_nontrivial_loops(
     return int(nontrivial.sum())
 
 
+CommitFunction = Callable[[Matching, np.ndarray], np.ndarray]
+
+
+class CommitRejected(ValueError):
+    """A commit rule refused a proposal it is not defined on.
+
+    Subclasses ValueError, so code that already catches ValueError is
+    unaffected; it exists so a long sweep can tell "this decoder's assumption
+    broke on this sample" (tally it, move to the next repetition) apart from a
+    genuine bug in the geometry or the grid.
+    """
+
+
+def classic_commit(full_matching: Matching, joined_syndrome: np.ndarray) -> np.ndarray:
+    """Default commit rule: full-lattice MWPM of the joined syndrome.
+
+    A commit function is what a JIT step actually writes down after the freshly
+    revealed time slice has been merged into the running prediction: given the
+    full-lattice matching and the joined syndrome it returns the edge set to
+    commit (a length num_edges array over the full space-time lattice). This one
+    commits whatever the offline MWPM of the joined syndrome proposes, i.e. the
+    protocol as originally implemented.
+
+    Any alternative commit rule (committing only the edges below the revealed
+    time slice, say, or a weighted / confidence-thresholded variant) has the same
+    signature and can be passed as the `commit` argument of jit_decode_step /
+    jit_decode_full, or declared once per layer as LayerSpec.commit in runner.py.
+    """
+    return full_matching.decode(joined_syndrome)
+
+
+def constant_speed_commit(
+    full_matching: Matching,
+    joined_syndrome: np.ndarray,
+    edge_endpoints: np.ndarray,
+) -> np.ndarray:
+    """Commit rule that walks each syndrome pair together at one site per step.
+
+    Where classic_commit writes down the whole MWPM proposal, this commits only
+    the tips of it: every cluster of the proposal is eaten one edge in from each
+    of its ends, and the freed syndrome point is carried one step forward in
+    time. The syndrome points of a long chain therefore approach each other at a
+    fixed speed of one lattice site per JIT step instead of being joined in one
+    go, and the chain is never closed -- the pair stays open until the ends meet.
+
+    Per cluster of the proposal (clusters as in lattice.edge_clusters: active
+    edges sharing a vertex):
+
+    - <= 2 edges: committed whole. The pair is already adjacent, so walking it
+      in is the same as closing it.
+    - > 2 edges: the cluster is expected to be spatial (x or y edges only). Then
+      for each end of the cluster -- a vertex the cluster touches exactly once,
+      i.e. a syndrome point -- commit (a) the cluster edge at that end and (b)
+      the time-like edge leaving that edge's *other* vertex, which moves the
+      syndrome point from the end vertex one site along the cluster and one step
+      forward in time.
+
+    The admitted exception to "spatial" is a chain that climbs to the leading
+    time slice. The prefix lattice of a JIT step ends in an open boundary node
+    (build_incidence_matrix's open_end_node, which jit_decode_step's
+    syndrome[-1] = 1 also uses as the parity sink), and its time edges are real
+    edges of the full lattice: a defect matched to that boundary shows up on the
+    joined syndrome one slice above the revealed prefix, reached by a cluster
+    carrying time-like edges. Such a cluster is admitted when its future-most end
+    carries a syndrome defect, and is then walked in by the same end rule as any
+    other. Any number of them may appear in one proposal -- the boundary node is
+    a boundary, not a single-defect sink, so MWPM can route several defects
+    across it in one decode, and chains from earlier steps persist in the
+    accumulated prediction. Measured at L = 9, 11 and p = 2.925e-2: of 27,900
+    commit calls, 2,190 carried one climbing cluster, 78 carried two and 2
+    carried three, in each case ordinary well-formed single-slice climbs far
+    apart on the lattice. They are walked in independently.
+
+    It raises CommitRejected when a time-like cluster does *not* end on a defect
+    in its future-most slice: that is not the leading-slice climb, so the
+    constant-speed picture does not apply to it. (No proposal in the measurement
+    above tripped this, as expected -- a degree-1 vertex of the proposal is by
+    construction a vertex of odd correction degree, i.e. a defect -- so it stands
+    as a tripwire rather than as a rule that fires in normal operation.)
+
+    Everything is accumulated mod 2, so an edge reached from an even number of
+    ends drops out: the cross of four spatial edges around one vertex commits its
+    four arms and nothing else, because the time edge at the shared center is
+    reached four times.
+
+    A cluster with no end (a closed loop: no vertex of degree 1) carries no
+    syndrome and contributes nothing. A junction where three or more cluster
+    edges meet is not an end -- "the edge at that end" would not be unique -- so
+    such a vertex is walked past, not from.
+
+    edge_endpoints is the lattice's (num_edges, 2) endpoint table from
+    build_edge_endpoints(); it is not part of CommitFunction's signature, so bind
+    it with make_constant_speed_commit() before handing this to a run.
+    """
+    full_prediction = full_matching.decode(joined_syndrome)
+    commit = np.zeros(full_prediction.shape[0], dtype=np.int64)
+
+    num_clusters, labels = edge_clusters(full_prediction, edge_endpoints)
+    clusters = cluster_edge_indices(labels, num_clusters)
+
+    # A cluster may carry time-like edges only as a chain climbing to a defect in
+    # the leading slice. There is no bound on how many such chains a proposal
+    # holds: the prefix boundary can absorb several defects in one decode.
+    for cluster in clusters:
+        if cluster.size <= 2 or not np.any(cluster % DIMENSIONS == DIMENSIONS - 1):
+            continue
+        ends = cluster_ends(cluster, edge_endpoints)
+        # cluster_ends is sorted and vertex ids are time-major, so ends[-1] is
+        # the end in the latest time slice the cluster reaches.
+        if ends.size == 0 or joined_syndrome[ends[-1]] % 2 == 0:
+            raise CommitRejected(
+                "constant_speed_commit expects clusters of more than two edges "
+                "to be purely spatial, except for chains climbing to a "
+                "leading-slice defect, but the time-like edges "
+                f"{cluster[cluster % DIMENSIONS == DIMENSIONS - 1].tolist()} sit "
+                f"in a {cluster.size}-edge cluster whose future-most end "
+                f"({ends[-1] if ends.size else 'none'}) carries no syndrome."
+            )
+
+    for cluster in clusters:
+        if cluster.size <= 2:
+            commit[cluster] += 1
+            continue
+
+        # Walk the cluster in one edge from each of its ends, the vertices it
+        # touches exactly once -- its syndrome points.
+        endpoints = edge_endpoints[cluster]
+        for end in cluster_ends(cluster, edge_endpoints):
+            at_end = cluster[np.any(endpoints == end, axis=1)][0]
+            first, second = edge_endpoints[at_end]
+            inner = second if first == end else first
+            commit[at_end] += 1
+            if inner >= 0:
+                commit[inner * DIMENSIONS + DIMENSIONS - 1] += 1
+
+    return (commit % 2).astype(np.uint8)
+
+
+def make_constant_speed_commit(edge_endpoints: np.ndarray) -> CommitFunction:
+    """Bind constant_speed_commit to a lattice, giving a CommitFunction.
+
+    The lattice's endpoint table is fixed for a whole run, so bind it once and
+    hand the result to LayerSpec.commit / jit_decode_full:
+
+        context = build_context(linear_size)
+        specs = make_twisted_layer_specs(
+            p, commit=make_constant_speed_commit(context.edge_endpoints)
+        )
+        run_layered_simulation(linear_size, specs, repetitions, context=context)
+    """
+    return partial(constant_speed_commit, edge_endpoints=edge_endpoints)
+
+
 def jit_decode_step(
     linear_size: int,
     noise: np.ndarray,
@@ -190,8 +325,13 @@ def jit_decode_step(
     full_matching: Matching,
     prefix_incidence: csc_matrix,
     prefix_matching: Matching,
+    commit: CommitFunction = classic_commit,
 ) -> np.ndarray:
-    """Run one JIT decoding step and return the joined correction."""
+    """Run one JIT decoding step and return the committed edges.
+
+    `commit` chooses which edges the step commits from the joined syndrome; it
+    defaults to classic_commit (full-lattice MWPM).
+    """
     syndrome = prefix_incidence @ noise[: prefix_incidence.shape[1]] % 2
     if np.count_nonzero(syndrome) % 2 == 1:
         syndrome[-1] = 1
@@ -200,7 +340,7 @@ def jit_decode_step(
     joined = current_prediction.copy()
     joined[: len(step_prediction)] += step_prediction
     joined_syndrome = full_incidence @ joined % 2
-    return full_matching.decode(joined_syndrome)
+    return commit(full_matching, joined_syndrome)
 
 
 def jit_decode_full(
@@ -211,8 +351,9 @@ def jit_decode_full(
     full_matching: Matching,
     prefix_incidences: List[csc_matrix],
     prefix_matchings: List[Matching],
+    commit: CommitFunction = classic_commit,
 ) -> np.ndarray:
-    """Run full JIT protocol across all time slices."""
+    """Run full JIT protocol across all time slices with one commit rule."""
     prediction = np.zeros(full_incidence.shape[1], dtype=np.uint8)
     for ti in range(time_depth):
         prediction += jit_decode_step(
@@ -224,5 +365,6 @@ def jit_decode_full(
             full_matching,
             prefix_incidences[ti],
             prefix_matchings[ti],
+            commit,
         )
     return prediction

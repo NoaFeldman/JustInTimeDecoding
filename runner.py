@@ -34,6 +34,10 @@ One repetition (run_repetition), following the protocol of the paper:
 Layers decode just in time by default; a layer with decoding="global" is
 corrected offline by full-lattice MWPM instead, which is how the final
 (twisted-Z) layer of the two-layer twisted quantum double protocol is handled.
+What a JIT step commits after joining the revealed slice is itself pluggable:
+LayerSpec.commit is a fn(full_matching, joined_syndrome) -> edges to commit, and
+defaults to decoder.classic_commit (the full-lattice MWPM of the joined
+syndrome).
 
 Reproducing the existing twisted quantum double data: two layers, three Z2
 channels each (the b/g/r X errors, then the b/g/r twisted Z errors) --
@@ -57,7 +61,7 @@ import numpy as np
 from pymatching import Matching
 from scipy.sparse import csc_matrix
 
-from .decoder import jit_decode_full
+from .decoder import CommitFunction, classic_commit, jit_decode_full
 from .geometry import DIMENSIONS, get_time_depth, last_time_step_measurement_edges
 from .lattice import (
     build_edge_endpoints,
@@ -191,6 +195,10 @@ class LayerSpec:
         layer by the layer below, and the heralded links this layer's decoder
         gets from it. Both are None for the bottom layer, which has no parent;
         herald_links stays None whenever heralding is disabled.
+    commit: fn(full_matching, joined_syndrome) -> edges to commit, the rule each
+        JIT step of this layer uses to turn the joined syndrome into the edges
+        it writes down. Defaults to decoder.classic_commit (full-lattice MWPM of
+        the joined syndrome); ignored when decoding == "global".
     """
 
     channels: Tuple[ChannelSpec, ...]
@@ -198,6 +206,7 @@ class LayerSpec:
     decoding: Literal["jit", "global"] = "jit"
     generate_delegated_errors: Optional[DelegatedErrorGenerator] = None
     herald_links: Optional[HeraldingFunction] = None
+    commit: CommitFunction = classic_commit
 
     @property
     def channel_keys(self) -> Tuple[str, ...]:
@@ -273,8 +282,9 @@ def decode_channel(
 
     Just in time (spec.decoding == "jit") this is the full time-sliced protocol
     of decoder.jit_decode_full: at every time step the revealed prefix syndrome
-    is decoded and rejoined with a full-lattice match. Globally it is a single
-    offline MWPM decode of the complete syndrome.
+    is decoded and rejoined, and spec.commit turns the joined syndrome into the
+    edges the step commits. Globally it is a single offline MWPM decode of the
+    complete syndrome, and spec.commit plays no role.
     """
     if spec.decoding not in ("jit", "global"):
         raise ValueError(
@@ -296,6 +306,7 @@ def decode_channel(
         full_matching,
         context.prefix_incidences,
         prefix_matchings,
+        spec.commit,
     )
     return (prediction % 2).astype(np.uint8)
 

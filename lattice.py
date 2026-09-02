@@ -13,7 +13,8 @@ from __future__ import annotations
 import itertools
 
 import numpy as np
-from scipy.sparse import csc_matrix
+from scipy.sparse import coo_matrix, csc_matrix
+from scipy.sparse.csgraph import connected_components
 
 from .geometry import DIMENSIONS, vertex_index
 
@@ -152,6 +153,93 @@ def build_edge_endpoints(incidence_matrix: csc_matrix) -> np.ndarray:
             endpoints[edge, slot[edge]] = vertex
             slot[edge] += 1
     return endpoints
+
+
+def edge_clusters(
+    edge_mask: np.ndarray,
+    edge_endpoints: np.ndarray,
+) -> tuple[int, np.ndarray]:
+    """Group the active edges of `edge_mask` into connected clusters.
+
+    The graph is the lattice itself: two active edges are in the same cluster
+    when they share a vertex, and clusters are the connected components of the
+    subgraph the active edges span. This is the general form of the component
+    split count_nontrivial_loops() does on a decoded residual, so anything that
+    needs "the consecutive blobs of 1s on this lattice" (a residual's loops, a
+    prediction's clusters, a syndrome's error chains) can use it.
+
+    edge_mask: length num_edges array of 0/1 (any nonzero counts as active),
+        indexed like every edge array in this package.
+    edge_endpoints: (num_edges, 2) vertex ids per edge from
+        build_edge_endpoints(); -1 in a slot means that endpoint is missing.
+
+    Returns (num_clusters, labels). `labels` is a length num_edges int array
+    holding each active edge's cluster id in 0..num_clusters-1, and -1 where the
+    edge is inactive or degenerate (an edge with no endpoint at all cannot be
+    connected to anything, so it joins no cluster). Cluster ids carry no
+    meaning beyond identity -- they are not ordered by size or position.
+    """
+    if edge_mask.shape[0] != edge_endpoints.shape[0]:
+        raise ValueError(
+            f"edge_mask has {edge_mask.shape[0]} edges but edge_endpoints has "
+            f"{edge_endpoints.shape[0]}; both must index the same lattice."
+        )
+
+    labels = np.full(edge_endpoints.shape[0], -1, dtype=np.int64)
+    active = np.flatnonzero(edge_mask)
+    if active.size == 0:
+        return 0, labels
+
+    # Endpoints of each active edge; collapse single-endpoint edges onto their
+    # one vertex and drop any edge with no endpoints.
+    first = edge_endpoints[active, 0].copy()
+    second = edge_endpoints[active, 1].copy()
+    first = np.where(first < 0, second, first)
+    second = np.where(second < 0, first, second)
+    keep = first >= 0
+    first, second, active = first[keep], second[keep], active[keep]
+    if active.size == 0:
+        return 0, labels
+
+    # Components of the vertex graph in which every active edge is a link. Only
+    # the touched vertices are indexed, so every component holds >= 1 edge and
+    # the component count is the cluster count.
+    verts = np.unique(np.concatenate([first, second]))
+    rows = np.searchsorted(verts, first)
+    cols = np.searchsorted(verts, second)
+    graph = coo_matrix(
+        (np.ones(rows.size), (rows, cols)), shape=(verts.size, verts.size)
+    )
+    num_clusters, vertex_labels = connected_components(graph, directed=False)
+    labels[active] = vertex_labels[rows]
+    return num_clusters, labels
+
+
+def cluster_ends(cluster: np.ndarray, edge_endpoints: np.ndarray) -> np.ndarray:
+    """The vertices a cluster of edges touches exactly once -- its ends.
+
+    An end is where the cluster stops, so on a decoder's proposal it is exactly
+    a syndrome point. Vertices where three or more of the cluster's edges meet
+    are junctions, not ends.
+
+    `cluster` is one edge-index array from cluster_edge_indices(). The returned
+    vertex ids are sorted ascending, and vertex_index() is time-major
+    (v = x + y*L + t*L^2), so the last entry is the end in the latest time slice
+    -- the "future-most" end of the cluster.
+    """
+    endpoints = edge_endpoints[cluster]
+    touched = endpoints[endpoints >= 0]
+    vertices, degree = np.unique(touched, return_counts=True)
+    return vertices[degree == 1]
+
+
+def cluster_edge_indices(labels: np.ndarray, num_clusters: int) -> list:
+    """Split the labels of edge_clusters() into one edge-index array per cluster."""
+    active = np.flatnonzero(labels >= 0)
+    order = np.argsort(labels[active], kind="stable")
+    active = active[order]
+    bounds = np.searchsorted(labels[active], np.arange(num_clusters + 1))
+    return [active[bounds[c] : bounds[c + 1]] for c in range(num_clusters)]
 
 
 def shift_edges_one_step(edges: np.ndarray, linear_size: int, time_depth: int) -> np.ndarray:

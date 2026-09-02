@@ -17,6 +17,18 @@ Everything model-specific comes from twisted.make_twisted_layer_specs(); the
 protocol itself is the general runner (runner.run_repetition), so switching to
 another quantum double model on the cubic lattice is a change of that one call.
 
+--commit selects the JIT commit rule and is the *only* knob that changes the
+physics of the run: "classic" (default) is the original protocol, and
+"constant-speed" is decoder.constant_speed_commit, which walks each syndrome
+pair together one lattice site per step instead of committing the whole MWPM
+proposal. Grid, chunk plan and per-rep seeds are shared code, so the two studies
+are a paired comparison of the commit rule alone -- give each its own
+--output-dir (results/tqd and results/tqd_cs). The constant-speed rule can
+refuse a proposal (decoder.CommitRejected); such repetitions are counted in
+`commit_rejected`, skipped, and dropped from the p_log denominator by the
+collector, which reports the rate. Retrying is pointless: the repetition is
+deterministically reseeded, so it would be refused again.
+
 The unit of work assigned to an array task is one *chunk* of the 10^6
 repetitions of a single (L, heralding) group, evaluated across all 40 p values.
 The four groups differ ~3x in cost, so chunks are allocated in proportion to a
@@ -77,6 +89,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
+    from ..decoder import CommitRejected, classic_commit, make_constant_speed_commit
     from ..runner import build_context, run_repetition, sample_physical_errors
     from ..twisted import make_twisted_layer_specs
 except ImportError:  # allow: python cluster/tqd_worker.py from the repo dir
@@ -90,8 +103,12 @@ except ImportError:  # allow: python cluster/tqd_worker.py from the repo dir
     if _pkg_parent not in sys.path:
         sys.path.insert(0, _pkg_parent)
     _package = os.path.basename(_pkg_dir)
+    _decoder = importlib.import_module(f"{_package}.decoder")
     _runner = importlib.import_module(f"{_package}.runner")
     _twisted = importlib.import_module(f"{_package}.twisted")
+    CommitRejected = _decoder.CommitRejected
+    classic_commit = _decoder.classic_commit
+    make_constant_speed_commit = _decoder.make_constant_speed_commit
     build_context = _runner.build_context
     run_repetition = _runner.run_repetition
     sample_physical_errors = _runner.sample_physical_errors
@@ -115,6 +132,17 @@ BOUNDARY: str = "OBC"
 MASTER_ENTROPY: int = 20260821
 CHECKPOINT_EVERY: int = 500
 DEFAULT_NUM_TASKS: int = 200
+
+# JIT commit rules this worker can run. "classic" is the original protocol
+# (decoder.classic_commit: commit the whole MWPM proposal of the joined
+# syndrome); "constant-speed" is decoder.constant_speed_commit, which walks each
+# syndrome pair together one site per step instead. Nothing else differs between
+# the two studies -- same grid, same chunk plan, same per-rep seeds -- so the
+# curves are a paired comparison of the commit rule alone. They must be written
+# to *different* --output-dir trees, which the file tag below also guards.
+COMMIT_RULES: Tuple[str, ...] = ("classic", "constant-speed")
+DEFAULT_COMMIT: str = "classic"
+COMMIT_FILE_TAGS: Dict[str, str] = {"classic": "", "constant-speed": "cs_"}
 
 # Rough seconds per repetition *per p value*, per (L, heralding) group, used
 # only to balance the chunk allocation across array tasks. These are estimates
@@ -141,6 +169,15 @@ def _request_stop(signum, frame):  # noqa: ANN001
 
 def herald_tag(heralding: bool) -> str:
     return "herald" if heralding else "plain"
+
+
+def commit_function(commit: str, context):  # noqa: ANN001, ANN201
+    """The CommitFunction named by --commit, bound to this run's lattice."""
+    if commit == "classic":
+        return classic_commit
+    if commit == "constant-speed":
+        return make_constant_speed_commit(context.edge_endpoints)
+    raise SystemExit(f"Unknown commit rule {commit!r}; use one of {COMMIT_RULES}.")
 
 
 def group_cost(linear_size: int, heralding: bool, reps_per_point: int) -> float:
@@ -220,10 +257,12 @@ def rep_seed(linear_size: int, p_index: int, rep_index: int) -> int:
     return int(sequence.generate_state(1)[0])
 
 
-def checkpoint_path(output_dir: str, task: dict) -> str:
+def checkpoint_path(output_dir: str, task: dict, commit: str = DEFAULT_COMMIT) -> str:
+    """Chunk file of one task. The classic run keeps its historical name."""
     return os.path.join(
         output_dir,
-        f"TQD_{BOUNDARY}_L{task['linear_size']}_{herald_tag(task['heralding'])}"
+        f"TQD_{BOUNDARY}_{COMMIT_FILE_TAGS[commit]}L{task['linear_size']}"
+        f"_{herald_tag(task['heralding'])}"
         f"_c{task['chunk_index']}of{task['num_chunks']}.pkl",
     )
 
@@ -245,21 +284,25 @@ def _atomic_dump(payload: dict, path: str) -> None:
         raise
 
 
-def _load_or_init(path: str, task: dict) -> dict:
+def _load_or_init(path: str, task: dict, commit: str = DEFAULT_COMMIT) -> dict:
     reps_target = task["rep_stop"] - task["rep_start"]
     if os.path.exists(path):
         with open(path, "rb") as handle:
             state = pickle.load(handle)
-        # Guard against a stale file from a different target/chunking.
+        # Guard against a stale file from a different target/chunking/commit rule.
         if (
             state.get("reps_target") == reps_target
             and state.get("rep_start") == task["rep_start"]
             and state.get("probabilities") == list(P_VALUES)
+            and state.get("commit", DEFAULT_COMMIT) == commit
         ):
+            state.setdefault("commit", commit)
+            state.setdefault("commit_rejected", [0] * len(P_VALUES))
             return state
     return {
         "study": "tqd_plog_vs_pphys",
         "model": MODEL,
+        "commit": commit,
         "linear_size": task["linear_size"],
         "heralding": task["heralding"],
         "num_layers": NUM_LAYERS,
@@ -273,10 +316,16 @@ def _load_or_init(path: str, task: dict) -> dict:
         "errors": [0] * len(P_VALUES),
         # Which layer failed first: 0 = JIT X layer, 1 = twisted Z layer.
         "errors_by_layer": [[0] * len(P_VALUES) for _ in range(NUM_LAYERS)],
+        # Repetitions the commit rule refused (CommitRejected); they advance the
+        # rep counter but are excluded from the p_log denominator by the
+        # collector, which reports them separately.
+        "commit_rejected": [0] * len(P_VALUES),
     }
 
 
-def task_progress(output_dir: str, plan: Sequence[dict]) -> List[dict]:
+def task_progress(
+    output_dir: str, plan: Sequence[dict], commit: str = DEFAULT_COMMIT
+) -> List[dict]:
     """Reps done vs reps targeted for every task of the plan, from its checkpoint.
 
     The checkpoints are the authority on what is finished: a task is complete
@@ -286,7 +335,7 @@ def task_progress(output_dir: str, plan: Sequence[dict]) -> List[dict]:
     progress = []
     for index, task in enumerate(plan, start=1):
         target = (task["rep_stop"] - task["rep_start"]) * len(P_VALUES)
-        path = checkpoint_path(output_dir, task)
+        path = checkpoint_path(output_dir, task, commit)
         done = 0
         if os.path.exists(path):
             try:
@@ -331,6 +380,7 @@ def print_status(
     output_dir: str,
     plan: Sequence[dict],
     hours_per_submission: float = 12.0,
+    commit: str = DEFAULT_COMMIT,
 ) -> None:
     """Print how much of the study is finished, and how to finish the rest.
 
@@ -340,7 +390,7 @@ def print_status(
     submissions of `hours_per_submission` each are needed. The estimate uses
     COST_PER_REP and inherits its accuracy -- treat it as an order of magnitude.
     """
-    progress = task_progress(output_dir, plan)
+    progress = task_progress(output_dir, plan, commit)
     unfinished = [entry for entry in progress if not entry["complete"]]
     done_reps = sum(entry["done"] for entry in progress)
     target_reps = sum(entry["target"] for entry in progress)
@@ -369,7 +419,9 @@ def print_status(
         f"({100.0 * done_reps / max(target_reps, 1):.1f}%)."
     )
     if not unfinished:
-        print("STUDY COMPLETE -- aggregate with cluster/tqd_collect.py.")
+        print(
+            f"STUDY COMPLETE ({commit} commit) -- aggregate with cluster/tqd_collect.py."
+        )
         return
 
     # Seconds left per task, from the cost table; the longest one sets how many
@@ -399,10 +451,14 @@ def print_status(
     if len(unfinished) > 20:
         print(f"  ... and {len(unfinished) - 20} more")
     array = format_array_ranges([entry["task_id"] for entry in unfinished])
-    print(
-        "\nResume with:\n"
-        f"    sbatch --array={array} cluster/tqd_study.slurm.sh"
-    )
+    if commit == "classic":
+        print(f"\nResume with:\n    sbatch --array={array} cluster/tqd_study.slurm.sh")
+    else:
+        print(
+            f"\nResume with:\n    sbatch --array={array} cluster/tqd_cs_study.slurm.sh\n"
+            "or, to re-collect and re-plot when it finishes:\n"
+            f"    bash cluster/tqd_cs_submit.sh {array}"
+        )
 
 
 def run_group_chunk(
@@ -411,6 +467,7 @@ def run_group_chunk(
     wall_budget_seconds: Optional[float] = None,
     checkpoint_every: int = CHECKPOINT_EVERY,
     verbose: bool = True,
+    commit: str = DEFAULT_COMMIT,
 ) -> str:
     """Run (or resume) one chunk with per-rep reseeding and atomic checkpoints.
 
@@ -418,8 +475,8 @@ def run_group_chunk(
     (wall-budget or signal); an interrupted chunk leaves a valid checkpoint that
     a later run continues. Never raises on time-out -- it saves and returns.
     """
-    path = checkpoint_path(output_dir, task)
-    state = _load_or_init(path, task)
+    path = checkpoint_path(output_dir, task, commit)
+    state = _load_or_init(path, task, commit)
     reps_target = state["reps_target"]
     if all(done >= reps_target for done in state["completed_reps"]):
         if verbose:
@@ -433,8 +490,14 @@ def run_group_chunk(
     since_checkpoint = 0
 
     # Layer specs are cheap dataclasses; build them once per p, outside the loop.
+    commit_fn = commit_function(commit, context)
     specs_by_p = [
-        make_twisted_layer_specs(probability, heralded=heralding, num_layers=NUM_LAYERS)
+        make_twisted_layer_specs(
+            probability,
+            heralded=heralding,
+            num_layers=NUM_LAYERS,
+            commit=commit_fn,
+        )
         for probability in P_VALUES
     ]
 
@@ -452,10 +515,19 @@ def run_group_chunk(
             np.random.seed(rep_seed(linear_size, p_index, rep_within_group))
 
             physical_errors = sample_physical_errors(context, specs_by_p[p_index])
-            outcome = run_repetition(context, specs_by_p[p_index], physical_errors)
-            state["errors"][p_index] += outcome["logical_error"]
-            if outcome["failed_layer"] is not None:
-                state["errors_by_layer"][outcome["failed_layer"]][p_index] += 1
+            # A commit rule may refuse a proposal it is not defined on (the
+            # constant-speed rule does). Retrying is pointless -- the repetition
+            # is reseeded deterministically, so it would refuse again forever --
+            # so the repetition is counted, tallied separately and skipped; the
+            # collector drops it from the p_log denominator and reports the rate.
+            try:
+                outcome = run_repetition(context, specs_by_p[p_index], physical_errors)
+            except CommitRejected:
+                state["commit_rejected"][p_index] += 1
+            else:
+                state["errors"][p_index] += outcome["logical_error"]
+                if outcome["failed_layer"] is not None:
+                    state["errors_by_layer"][outcome["failed_layer"]][p_index] += 1
             state["completed_reps"][p_index] += 1
             since_checkpoint += 1
 
@@ -490,6 +562,17 @@ def main() -> None:
     )
     parser.add_argument("--task-id", type=int, help="1-based Slurm array task id")
     parser.add_argument("--output-dir", default="results/tqd")
+    parser.add_argument(
+        "--commit",
+        default=DEFAULT_COMMIT,
+        choices=list(COMMIT_RULES),
+        help=(
+            "JIT commit rule. 'classic' is the original protocol; "
+            "'constant-speed' walks each syndrome pair together one site per "
+            "step. Everything else about the study is identical -- give each "
+            "rule its own --output-dir."
+        ),
+    )
     parser.add_argument("--num-tasks", type=int, default=DEFAULT_NUM_TASKS)
     parser.add_argument("--reps-per-point", type=int, default=REPS_PER_POINT)
     parser.add_argument(
@@ -557,7 +640,7 @@ def main() -> None:
         return
 
     if args.print_status:
-        print_status(args.output_dir, plan, args.hours_per_submission)
+        print_status(args.output_dir, plan, args.hours_per_submission, args.commit)
         return
 
     if args.task_id is None:
@@ -579,8 +662,9 @@ def main() -> None:
         output_dir=args.output_dir,
         wall_budget_seconds=args.wall_budget,
         checkpoint_every=args.checkpoint_every,
+        commit=args.commit,
     )
-    print(f"task {args.task_id} status={status}")
+    print(f"task {args.task_id} commit={args.commit} status={status}")
 
 
 if __name__ == "__main__":

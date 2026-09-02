@@ -181,6 +181,7 @@ def make_twisted_layer_specs(
     physical_error_rate: float,
     heralded: bool = False,
     num_layers: int = 2,
+    commit=None,
 ):
     """The twisted quantum double stack, as the general runner wants it.
 
@@ -197,11 +198,18 @@ def make_twisted_layer_specs(
     All layers share ``physical_error_rate``. num_layers > 2 stacks further
     twisted-Z layers, each delegating into the next by the same rules and only
     the topmost decoded globally; the physical model itself has two layers.
+
+    ``commit`` is the JIT commit rule handed to every just-in-time layer, i.e.
+    fn(full_matching, joined_syndrome) -> edges to commit; None keeps
+    decoder.classic_commit, the full-lattice MWPM of the joined syndrome.
     """
     # Imported here to keep the module importable on its own: runner.py imports
     # the general lattice/decoder code, never the model-specific code below.
-    from .decoder import z2_logical_error
+    from .decoder import classic_commit, z2_logical_error
     from .runner import ChannelSpec, LayerSpec
+
+    if commit is None:
+        commit = classic_commit
 
     def channels(error_type: str):
         check = z2_logical_error(error_type)
@@ -220,6 +228,7 @@ def make_twisted_layer_specs(
             channels=channels("x"),
             noise_probability=physical_error_rate,
             decoding="jit",
+            commit=commit,
         )
     ]
     for layer_index in range(1, num_layers):
@@ -230,6 +239,7 @@ def make_twisted_layer_specs(
                 decoding="global" if layer_index == num_layers - 1 else "jit",
                 generate_delegated_errors=twisted_delegated_errors,
                 herald_links=completing_the_loop_herald if heralded else None,
+                commit=commit,
             )
         )
     return specs
