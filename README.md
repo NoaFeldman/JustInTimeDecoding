@@ -191,6 +191,31 @@ Two things to keep in mind when reading the result:
   10^6 reps/point, so stop re-submitting at a comparable fraction to match its
   statistics (or run to 10^6 for a sharper curve).
 
+### Same study, constant-speed commit with a classic last step
+
+The constant-speed data have no threshold because of the *last* JIT step: it
+sees the full lattice and must close every open syndrome pair, but the walk
+closes only clusters of at most two edges per step, so any pair still three or
+more sites apart is left as an open residual string, which the X logical-error
+check flags. A 3-chain in either of the last two slices is enough, giving a
+floor of order `L^2 p^3` at every L. `--commit constant-speed-flush` keeps the
+walk on every step but commits classically on the last one
+(`decoder.jit_decode_full(..., final_commit=classic_commit)`,
+`LayerSpec.final_commit`), which removes that floor and leaves only the genuine
+cost of the walk (larger residual loops, more delegated twisted errors).
+
+```bash
+bash cluster/tqd_csf_submit.sh          # array + collect/plot in one go
+python cluster/tqd_worker.py --print-status \
+    --output-dir results/tqd_csf --commit constant-speed-flush
+bash cluster/tqd_csf_submit.sh 7,19-42  # resume the ids it prints
+```
+
+Results go to `results/tqd_csf` (chunk tag `csf_`). The deterministic check
+behind the diagnosis is `diagnostics/cs_endgame_check.py`: it enumerates the
+weight-3 configurations in the last slices and shows which ones the plain
+constant-speed rule leaves open and that the flush closes them.
+
 ### Large-L extension: L in {13, 15, 17}
 
 Same study, three more lattice sizes, so the family becomes

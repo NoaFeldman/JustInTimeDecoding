@@ -18,12 +18,16 @@ protocol itself is the general runner (runner.run_repetition), so switching to
 another quantum double model on the cubic lattice is a change of that one call.
 
 --commit selects the JIT commit rule and is the *only* knob that changes the
-physics of the run: "classic" (default) is the original protocol, and
+physics of the run: "classic" (default) is the original protocol,
 "constant-speed" is decoder.constant_speed_commit, which walks each syndrome
 pair together one lattice site per step instead of committing the whole MWPM
-proposal. Grid, chunk plan and per-rep seeds are shared code, so the two studies
-are a paired comparison of the commit rule alone -- give each its own
---output-dir (results/tqd and results/tqd_cs). The constant-speed rule can
+proposal, and "constant-speed-flush" is the same walk with the classic commit
+on the last JIT step only, so the pairs the walk has not finished when time
+runs out are closed instead of being left as open strings (which the X check
+counts as logical errors -- the L^2 p^3 floor of the plain constant-speed
+data). Grid, chunk plan and per-rep seeds are shared code, so the studies are
+a paired comparison of the commit rule alone -- give each its own --output-dir
+(results/tqd, results/tqd_cs, results/tqd_csf). The constant-speed rules can
 refuse a proposal (decoder.CommitRejected); such repetitions are counted in
 `commit_rejected`, skipped, and dropped from the p_log denominator by the
 collector, which reports the rate. Retrying is pointless: the repetition is
@@ -136,13 +140,23 @@ DEFAULT_NUM_TASKS: int = 200
 # JIT commit rules this worker can run. "classic" is the original protocol
 # (decoder.classic_commit: commit the whole MWPM proposal of the joined
 # syndrome); "constant-speed" is decoder.constant_speed_commit, which walks each
-# syndrome pair together one site per step instead. Nothing else differs between
-# the two studies -- same grid, same chunk plan, same per-rep seeds -- so the
+# syndrome pair together one site per step instead; "constant-speed-flush" is
+# that walk on every step but the last, where it commits classically so that
+# no open pair survives the end of the time axis. Nothing else differs between
+# the studies -- same grid, same chunk plan, same per-rep seeds -- so the
 # curves are a paired comparison of the commit rule alone. They must be written
 # to *different* --output-dir trees, which the file tag below also guards.
-COMMIT_RULES: Tuple[str, ...] = ("classic", "constant-speed")
+COMMIT_RULES: Tuple[str, ...] = ("classic", "constant-speed", "constant-speed-flush")
 DEFAULT_COMMIT: str = "classic"
-COMMIT_FILE_TAGS: Dict[str, str] = {"classic": "", "constant-speed": "cs_"}
+COMMIT_FILE_TAGS: Dict[str, str] = {
+    "classic": "",
+    "constant-speed": "cs_",
+    "constant-speed-flush": "csf_",
+}
+COMMIT_STUDY_SCRIPTS: Dict[str, str] = {
+    "constant-speed": "cs",
+    "constant-speed-flush": "csf",
+}
 
 # Rough seconds per repetition *per p value*, per (L, heralding) group, used
 # only to balance the chunk allocation across array tasks. These are estimates
@@ -185,11 +199,17 @@ def herald_tag(heralding: bool) -> str:
 
 
 def commit_function(commit: str, context):  # noqa: ANN001, ANN201
-    """The CommitFunction named by --commit, bound to this run's lattice."""
+    """The (commit, final_commit) pair named by --commit, bound to this lattice.
+
+    final_commit is the rule of the last JIT step only, None meaning "same as
+    commit" (see decoder.jit_decode_full).
+    """
     if commit == "classic":
-        return classic_commit
+        return classic_commit, None
     if commit == "constant-speed":
-        return make_constant_speed_commit(context.edge_endpoints)
+        return make_constant_speed_commit(context.edge_endpoints), None
+    if commit == "constant-speed-flush":
+        return make_constant_speed_commit(context.edge_endpoints), classic_commit
     raise SystemExit(f"Unknown commit rule {commit!r}; use one of {COMMIT_RULES}.")
 
 
@@ -470,10 +490,11 @@ def print_status(
     if commit == "classic":
         print(f"\nResume with:\n    sbatch --array={array} cluster/tqd_study.slurm.sh")
     else:
+        stem = COMMIT_STUDY_SCRIPTS[commit]
         print(
-            f"\nResume with:\n    sbatch --array={array} cluster/tqd_cs_study.slurm.sh\n"
+            f"\nResume with:\n    sbatch --array={array} cluster/tqd_{stem}_study.slurm.sh\n"
             "or, to re-collect and re-plot when it finishes:\n"
-            f"    bash cluster/tqd_cs_submit.sh {array}"
+            f"    bash cluster/tqd_{stem}_submit.sh {array}"
         )
 
 
@@ -506,13 +527,14 @@ def run_group_chunk(
     since_checkpoint = 0
 
     # Layer specs are cheap dataclasses; build them once per p, outside the loop.
-    commit_fn = commit_function(commit, context)
+    commit_fn, final_commit_fn = commit_function(commit, context)
     specs_by_p = [
         make_twisted_layer_specs(
             probability,
             heralded=heralding,
             num_layers=NUM_LAYERS,
             commit=commit_fn,
+            final_commit=final_commit_fn,
         )
         for probability in P_VALUES
     ]
@@ -585,8 +607,10 @@ def main() -> None:
         help=(
             "JIT commit rule. 'classic' is the original protocol; "
             "'constant-speed' walks each syndrome pair together one site per "
-            "step. Everything else about the study is identical -- give each "
-            "rule its own --output-dir."
+            "step; 'constant-speed-flush' does the same but commits classically "
+            "on the last step, closing every pair the walk has not finished. "
+            "Everything else about the study is identical -- give each rule "
+            "its own --output-dir."
         ),
     )
     parser.add_argument("--num-tasks", type=int, default=DEFAULT_NUM_TASKS)

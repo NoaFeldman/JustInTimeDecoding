@@ -182,6 +182,7 @@ def make_twisted_layer_specs(
     heralded: bool = False,
     num_layers: int = 2,
     commit=None,
+    final_commit=None,
 ):
     """The twisted quantum double stack, as the general runner wants it.
 
@@ -202,6 +203,9 @@ def make_twisted_layer_specs(
     ``commit`` is the JIT commit rule handed to every just-in-time layer, i.e.
     fn(full_matching, joined_syndrome) -> edges to commit; None keeps
     decoder.classic_commit, the full-lattice MWPM of the joined syndrome.
+    ``final_commit`` is the rule of the last JIT step only (None: same as
+    ``commit``); pass decoder.classic_commit with a constant-speed ``commit``
+    so the last step closes every syndrome pair the walk has not finished.
     """
     # Imported here to keep the module importable on its own: runner.py imports
     # the general lattice/decoder code, never the model-specific code below.
@@ -229,6 +233,7 @@ def make_twisted_layer_specs(
             noise_probability=physical_error_rate,
             decoding="jit",
             commit=commit,
+            final_commit=final_commit,
         )
     ]
     for layer_index in range(1, num_layers):
@@ -240,6 +245,7 @@ def make_twisted_layer_specs(
                 generate_delegated_errors=twisted_delegated_errors,
                 herald_links=completing_the_loop_herald if heralded else None,
                 commit=commit,
+                final_commit=final_commit,
             )
         )
     return specs

@@ -199,6 +199,11 @@ class LayerSpec:
         JIT step of this layer uses to turn the joined syndrome into the edges
         it writes down. Defaults to decoder.classic_commit (full-lattice MWPM of
         the joined syndrome); ignored when decoding == "global".
+    final_commit: the commit rule of the *last* JIT step only, or None to use
+        `commit` there too. The last step has to close every open syndrome
+        pair (its prefix is the full lattice), which a partial rule such as
+        decoder.constant_speed_commit cannot do in one step; final_commit=
+        decoder.classic_commit closes them. Ignored when decoding == "global".
     """
 
     channels: Tuple[ChannelSpec, ...]
@@ -207,6 +212,7 @@ class LayerSpec:
     generate_delegated_errors: Optional[DelegatedErrorGenerator] = None
     herald_links: Optional[HeraldingFunction] = None
     commit: CommitFunction = classic_commit
+    final_commit: Optional[CommitFunction] = None
 
     @property
     def channel_keys(self) -> Tuple[str, ...]:
@@ -307,6 +313,7 @@ def decode_channel(
         context.prefix_incidences,
         prefix_matchings,
         spec.commit,
+        final_commit=spec.final_commit,
     )
     return (prediction % 2).astype(np.uint8)
 

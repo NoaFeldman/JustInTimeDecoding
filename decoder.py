@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, List, Literal
+from typing import Callable, List, Literal, Optional
 
 import numpy as np
 from pymatching import Matching
@@ -352,10 +352,25 @@ def jit_decode_full(
     prefix_incidences: List[csc_matrix],
     prefix_matchings: List[Matching],
     commit: CommitFunction = classic_commit,
+    final_commit: Optional[CommitFunction] = None,
 ) -> np.ndarray:
-    """Run full JIT protocol across all time slices with one commit rule."""
+    """Run full JIT protocol across all time slices with one commit rule.
+
+    `final_commit`, when given, replaces `commit` on the last step only. The
+    last step is the one where the prefix lattice is the full lattice, so
+    whatever the joined syndrome still holds must be closed there: a rule that
+    commits only part of the proposal (constant_speed_commit walks each pair in
+    one site per step and cannot finish a chain of more than two edges in a
+    single step) leaves open strings in the residual, which the logical-error
+    check counts as failures. Passing final_commit=classic_commit closes them.
+    None keeps `commit` on every step, the behaviour of the original protocol.
+    """
     prediction = np.zeros(full_incidence.shape[1], dtype=np.uint8)
+    last_step = time_depth - 1
     for ti in range(time_depth):
+        step_commit = commit
+        if ti == last_step and final_commit is not None:
+            step_commit = final_commit
         prediction += jit_decode_step(
             linear_size,
             noise,
@@ -365,6 +380,6 @@ def jit_decode_full(
             full_matching,
             prefix_incidences[ti],
             prefix_matchings[ti],
-            commit,
+            step_commit,
         )
     return prediction

@@ -67,6 +67,7 @@ def wilson_interval(errors: int, reps: int, z: float = WILSON_Z) -> Tuple[float,
 COMMIT_LABELS = {
     "classic": "classic commit",
     "constant-speed": "constant-speed commit",
+    "constant-speed-flush": "constant-speed commit, classic on the last step",
 }
 
 
