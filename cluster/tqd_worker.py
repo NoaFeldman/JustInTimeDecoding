@@ -156,6 +156,19 @@ COST_PER_REP: Dict[Tuple[int, bool], float] = {
     (9, True): 0.45,
     (11, False): 0.75,
     (11, True): 0.95,
+    # Large-L extension (cluster/tqd_largeL.slurm.sh). Only *relative* values
+    # matter -- the table balances a plan, it does not predict wall time -- so
+    # these keep the scale of the four entries above rather than introducing a
+    # second one: measured seconds/rep of the constant-speed rule (0.054, 0.086,
+    # 0.074, 0.106, 0.124, 0.202 for 13/15/17 x plain/herald, averaged over
+    # p in {7.5e-3, 1.5e-2, 2.925e-2}) times the ~28x margin the L = 9, 11
+    # entries carry over their own measurement.
+    (13, False): 1.5,
+    (13, True): 2.4,
+    (15, False): 2.1,
+    (15, True): 3.0,
+    (17, False): 3.5,
+    (17, True): 5.7,
 }
 
 # Flag flipped by the signal handler; the rep loop checkpoints and exits on it.
@@ -395,7 +408,10 @@ def print_status(
     done_reps = sum(entry["done"] for entry in progress)
     target_reps = sum(entry["target"] for entry in progress)
 
-    for key in [(size, herald) for size in L_LIST for herald in HERALDING_OPTIONS]:
+    plan_keys = sorted(
+        {(task["linear_size"], task["heralding"]) for task in plan}
+    )
+    for key in plan_keys:
         group = [
             entry
             for entry in progress

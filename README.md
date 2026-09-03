@@ -191,6 +191,56 @@ Two things to keep in mind when reading the result:
   10^6 reps/point, so stop re-submitting at a comparable fraction to match its
   statistics (or run to 10^6 for a sharper curve).
 
+### Large-L extension: L in {13, 15, 17}
+
+Same study, three more lattice sizes, so the family becomes
+`L in {9, 11, 13, 15, 17}`. It is the same worker again — only `--L-list` and
+the output directory change — and it runs either commit rule:
+
+```bash
+bash cluster/tqd_largeL_submit.sh                 # constant-speed (default)
+COMMIT=classic bash cluster/tqd_largeL_submit.sh  # the classic rule instead
+```
+
+That submits `cluster/tqd_largeL.slurm.sh` (200-task array over the six
+`(L, heralding)` groups, into `results/tqd_cs_largeL` or `results/tqd_largeL`)
+and then `cluster/tqd_largeL_collect.slurm.sh` with `--dependency=afterok` on
+it. The collect job reads the base directory *and* the extension in one pass,
+so the figures show all five sizes; it skips the base directory if it holds no
+chunks yet.
+
+**The plots are split by accounting option** (`--split-heralding`): one figure
+for plain and one for heralded, each with a curve per L and color encoding L —
+the combined two-size figure does not stay legible at five. Both scales are
+produced:
+
+```
+results/tqd_cs_largeL/tqd_cs_plog_vs_pphys_linear_plain.pdf
+results/tqd_cs_largeL/tqd_cs_plog_vs_pphys_linear_herald.pdf
+results/tqd_cs_largeL/tqd_cs_plog_vs_pphys_log_plain.pdf
+results/tqd_cs_largeL/tqd_cs_plog_vs_pphys_log_herald.pdf
+```
+
+Any collect run can be split the same way, and `--results-dir` now takes
+several directories:
+
+```bash
+python cluster/tqd_collect.py     --results-dir results/tqd_cs results/tqd_cs_largeL     --plot results/tqd_cs_largeL/tqd_cs_plog_vs_pphys_linear.pdf     --split-heralding
+```
+
+Progress and resume for the extension:
+
+```bash
+python cluster/tqd_worker.py --print-status --L-list 13,15,17     --output-dir results/tqd_cs_largeL --commit constant-speed
+bash cluster/tqd_largeL_submit.sh 7,19-42
+```
+
+Scale: measured 0.054 / 0.086 / 0.074 / 0.106 / 0.124 / 0.202 s per repetition
+for (13, 15, 17) x (plain, heralded) with the constant-speed rule — about
+**7,200 core-hours** for the full 10^6 reps/point, ~36 h per task on the
+200-job array, so roughly three submissions. `COST_PER_REP` carries entries for
+these sizes so the chunk allocation (17/26/23/33/38/63 tasks) is balanced.
+
 ## Multi-layer JIT
 
 ```python

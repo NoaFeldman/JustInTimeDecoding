@@ -41,7 +41,7 @@ import glob
 import math
 import os
 import pickle
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 WILSON_Z = 1.96  # 95% confidence
 
@@ -70,7 +70,9 @@ COMMIT_LABELS = {
 }
 
 
-def collect(results_dir: str, rejected_as_errors: bool = False) -> Dict[Tuple[int, bool], dict]:
+def collect(
+    results_dirs, rejected_as_errors: bool = False
+) -> Dict[Tuple[int, bool], dict]:
     """Sum every chunk of the study into one entry per (L, heralding) group.
 
     Repetitions the commit rule refused are held in `commit_rejected`. By
@@ -79,9 +81,22 @@ def collect(results_dir: str, rejected_as_errors: bool = False) -> Dict[Tuple[in
     conservative reading -- the truth is between the two, and the printed table
     reports the rejected fraction so the gap is visible.
     """
-    files = sorted(glob.glob(os.path.join(results_dir, "TQD_*.pkl")))
+    if isinstance(results_dirs, str):
+        results_dirs = [results_dirs]
+    # Several directories are summed as one study: that is how the large-L
+    # extension (cluster/tqd_largeL.slurm.sh) joins its L to the base run when
+    # the two were written side by side rather than into a shared tree. Groups
+    # are keyed by (L, heralding), so directories that hold different L merge
+    # cleanly and a repeated (L, heralding) would simply pool its chunks.
+    files = sorted(
+        path
+        for directory in results_dirs
+        for path in glob.glob(os.path.join(directory, "TQD_*.pkl"))
+    )
     if not files:
-        raise SystemExit(f"No TQD_*.pkl chunk files found in {results_dir}.")
+        raise SystemExit(
+            "No TQD_*.pkl chunk files found in " + ", ".join(results_dirs) + "."
+        )
 
     summary: Dict[Tuple[int, bool], dict] = {}
     skipped = 0
@@ -143,8 +158,9 @@ def collect(results_dir: str, rejected_as_errors: bool = False) -> Dict[Tuple[in
 
     if not summary:
         raise SystemExit(
-            f"None of the {len(files)} TQD_*.pkl files in {results_dir} is a chunk "
-            "checkpoint of this study."
+            f"None of the {len(files)} TQD_*.pkl files in "
+            + ", ".join(results_dirs)
+            + " is a chunk checkpoint of this study."
         )
     if skipped:
         print(f"Skipped {skipped} file(s) that are not chunk checkpoints.")
@@ -234,10 +250,29 @@ def print_summary(summary: Dict[Tuple[int, bool], dict]) -> None:
             )
 
 
+SIZE_COLORS = (
+    "tab:blue",
+    "tab:orange",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+    "tab:brown",
+    "tab:olive",
+    "tab:cyan",
+)
+
+
+def split_output_path(output_path: str, suffix: str) -> str:
+    """Insert `_suffix` before the extension: a.pdf -> a_plain.pdf."""
+    stem, extension = os.path.splitext(output_path)
+    return f"{stem}_{suffix}{extension}"
+
+
 def plot(
     summary: Dict[Tuple[int, bool], dict],
     output_path: str,
     yscale: str = "linear",
+    heralding: Optional[bool] = None,
 ) -> None:
     """Plot p_log vs p_phys, one curve per (L, heralding).
 
@@ -246,14 +281,26 @@ def plot(
     resolve the small-p tail instead; there p_log = 0 cannot be drawn, so those
     points become 95% upper limits (see below).
 
-    Color encodes the accounting option (plain vs heralded), which is the
-    comparison the study is about; the lattice size is the marker and the line
-    style. Sizes beyond the four tabulated styles cycle through them again.
+    With heralding=None every group is drawn on one figure: color encodes the
+    accounting option (plain vs heralded), the lattice size the marker and the
+    line style. That reads well for two sizes but not for five, so passing
+    heralding=True/False restricts the figure to that one option and frees color
+    to encode L instead -- which is what --split-heralding does, writing one
+    figure per option. Sizes beyond the tabulated styles cycle through them.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    if heralding is not None:
+        summary = {key: entry for key, entry in summary.items() if key[1] == heralding}
+        if not summary:
+            print(
+                f"No {'heralded' if heralding else 'plain'} groups to plot; "
+                f"skipping {output_path}."
+            )
+            return
 
     commits = {entry.get("commit", "classic") for entry in summary.values()}
     commit_label = COMMIT_LABELS.get(
@@ -262,16 +309,29 @@ def plot(
 
     herald_colors = {False: "tab:blue", True: "tab:red"}
     herald_labels = {False: "plain", True: "heralded"}
-    size_styles = [("o", "-"), ("s", "--"), ("^", ":"), ("D", "-.")]
+    size_styles = [
+        ("o", "-"), ("s", "--"), ("^", ":"), ("D", "-."), ("v", (0, (3, 1, 1, 1))),
+    ]
     sizes = sorted({key[0] for key in summary})
 
     figure, axis = plt.subplots(figsize=(7.0, 5.0))
     # Legend grouped by accounting option, matching the color encoding.
     for key in sorted(summary, key=lambda k: (k[1], k[0])):
         entry = summary[key]
-        linear_size, heralding = key
+        linear_size, key_heralding = key
         marker, line_style = size_styles[sizes.index(linear_size) % len(size_styles)]
-        herald_label = herald_labels[heralding]
+        herald_label = herald_labels[key_heralding]
+        # One option per figure -> color is free to separate the sizes.
+        curve_color = (
+            SIZE_COLORS[sizes.index(linear_size) % len(SIZE_COLORS)]
+            if heralding is not None
+            else herald_colors[key_heralding]
+        )
+        curve_label = (
+            f"L = {linear_size}"
+            if heralding is not None
+            else f"{herald_label}, L = {linear_size}"
+        )
         points = list(
             zip(
                 entry["probabilities"],
@@ -301,8 +361,8 @@ def plot(
             markersize=4,
             linewidth=1.2,
             capsize=2,
-            color=herald_colors[heralding],
-            label=f"{herald_label}, L = {linear_size}",
+            color=curve_color,
+            label=curve_label,
         )
         if limits:
             bounds = [point[3] for point in limits]
@@ -313,16 +373,21 @@ def plot(
                 uplims=True,
                 linestyle="none",
                 linewidth=1.0,
-                color=herald_colors[heralding],
+                color=curve_color,
                 alpha=0.6,
             )
 
     axis.set_xlabel(r"physical error rate $p_{\mathrm{phys}}$")
     axis.set_ylabel(r"logical error rate $p_{\mathrm{log}}$")
     axis.set_yscale(yscale)
+    option_label = (
+        ""
+        if heralding is None
+        else f", {'heralded' if heralding else 'plain'} accounting"
+    )
     axis.set_title(
         "Twisted quantum double, 2 layers: JIT logical error rate\n"
-        f"({commit_label})"
+        f"({commit_label}{option_label})"
     )
     axis.grid(True, which="both", alpha=0.3)
     axis.legend()
@@ -372,7 +437,16 @@ def write_csv(summary: Dict[Tuple[int, bool], dict], path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect and plot the TQD p_log study.")
-    parser.add_argument("--results-dir", default="results/tqd")
+    parser.add_argument(
+        "--results-dir",
+        nargs="+",
+        default=["results/tqd"],
+        help=(
+            "One or more directories of TQD_*.pkl chunks, summed as one study. "
+            "Give several to draw the base run and its large-L extension "
+            "together, e.g. --results-dir results/tqd_cs results/tqd_cs_largeL."
+        ),
+    )
     parser.add_argument("--output", default="results/tqd/tqd_summary.pkl")
     parser.add_argument("--csv", default="results/tqd/tqd_plog_vs_pphys.csv")
     parser.add_argument("--plot", default="results/tqd/tqd_plog_vs_pphys.pdf")
@@ -384,6 +458,16 @@ def main() -> None:
         help=(
             "y-axis scale of the plot (default linear); log resolves the "
             "small-p tail but cannot show the p_log = 0 points."
+        ),
+    )
+    parser.add_argument(
+        "--split-heralding",
+        action="store_true",
+        help=(
+            "Write one figure per accounting option instead of one combined "
+            "figure: <plot>_plain.<ext> and <plot>_herald.<ext>, each with one "
+            "curve per L (color encodes L). Preferred once the sweep covers "
+            "more than two sizes."
         ),
     )
     parser.add_argument(
@@ -406,7 +490,16 @@ def main() -> None:
 
     write_csv(summary, args.csv)
     if not args.no_plot:
-        plot(summary, args.plot, yscale=args.yscale)
+        if args.split_heralding:
+            for heralding, suffix in ((False, "plain"), (True, "herald")):
+                plot(
+                    summary,
+                    split_output_path(args.plot, suffix),
+                    yscale=args.yscale,
+                    heralding=heralding,
+                )
+        else:
+            plot(summary, args.plot, yscale=args.yscale)
 
 
 if __name__ == "__main__":
