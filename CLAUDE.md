@@ -22,6 +22,5 @@ Find every place that is waiting on this decision with:
 
     grep -rn "TODO(LICENSE" .
 
-Repository visibility is also open: GitHub reported both of the owner's repositories (`JustInTimeDecoding`,
-`JIT_Dihedral`) as **public** on 2026-10-02; the owner has to verify and change it in the repository settings
-(an assistant cannot).
+This repository is public (as of 2026-10-02). Only the owner can change repository visibility, in the repository
+settings; an assistant cannot.
