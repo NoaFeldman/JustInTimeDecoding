@@ -45,12 +45,6 @@ Model-independent machinery first, then one module per model.
 - cluster/: Slurm array worker and collector for multilayer sweeps
   (multilayer_worker.py, multilayer_collect.py), driven by multilayer.slurm.sh.
 - cli.py: command-line wrapper preserving legacy argument order.
-- pauli_conjugation.py: U^dagger E U for a Pauli sum E (bit-packed
-  `PackedPauliSum`, 48 B/term at N <= 128; SparsePauliOp or labels +
-  coefficients are converted at the boundary) and a local Clifford sum
-  U = sum_j c_j C_j (`LocalCliffordSum`, whose cache of U^dagger Q U is reused
-  across locations). Requires qiskit and numpy >= 2.0. Checked against dense
-  matrices and qiskit algebra by diagnostics/pauli_conjugation_check.py.
 
 ## Quick usage
 
