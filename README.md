@@ -28,7 +28,14 @@ Model-independent machinery first, then one module per model.
 - TQD_runner.py: the original two-layer twisted quantum double driver
   (`run_full_simulation`, `run_x_only_simulation`), kept for reproducing the
   published datasets. `make_twisted_layer_specs` reproduces the same protocol
-  through the general runner.
+  through the general runner. Both now default to the Eq. (41) twist rules plus
+  the linking-charge chain c_0 (linking.py); `c0_0_approx=True,
+  legacy_twist_rules=True` reproduces the published protocol bit for bit.
+- linking.py: Appendix A of arxiv/2604.02033 on the explicit lattice --
+  histories a with da = b (`sample_history`), the Eq. (41) twisted errors
+  (`TwistGeometry.twisted_matrix`, `twisted_z_errors`), and kappa^b / c_0
+  (`linking_syndrome`, `linking_charge_errors`). Checked by
+  diagnostics/linking_check.py.
 - multilayer.py: N-layer generalization where every layer is corrected just in
   time, interleaved per time step; flux loops of layer i delegate errors into
   layer i+1. Per-layer delegated-error generation and decoder-side accounting
@@ -38,6 +45,12 @@ Model-independent machinery first, then one module per model.
 - cluster/: Slurm array worker and collector for multilayer sweeps
   (multilayer_worker.py, multilayer_collect.py), driven by multilayer.slurm.sh.
 - cli.py: command-line wrapper preserving legacy argument order.
+- pauli_conjugation.py: U^dagger E U for a Pauli sum E (bit-packed
+  `PackedPauliSum`, 48 B/term at N <= 128; SparsePauliOp or labels +
+  coefficients are converted at the boundary) and a local Clifford sum
+  U = sum_j c_j C_j (`LocalCliffordSum`, whose cache of U^dagger Q U is reused
+  across locations). Requires qiskit and numpy >= 2.0. Checked against dense
+  matrices and qiskit algebra by diagnostics/pauli_conjugation_check.py.
 
 ## Quick usage
 
@@ -265,6 +278,53 @@ for (13, 15, 17) x (plain, heralded) with the constant-speed rule — about
 **7,200 core-hours** for the full 10^6 reps/point, ~36 h per task on the
 200-job array, so roughly three submissions. `COST_PER_REP` carries entries for
 these sizes so the chunk allocation (17/26/23/33/38/63 tasks) is balanced.
+
+## Linking charge c_0: Figs. 7 and 8 without the c_0 = 0 approximation
+
+Algorithm 1 of arxiv/2604.02033 adds, in step 5, a fixed Z chain c_0 with
+K^b d^T c_0 = kappa^b to every Z step; the published data set c_0 = 0
+(Remark 1). linking.py computes it: for each X residual b it samples a history
+a with da = b, builds M~^b from Eq. (41), finds the detectors K^b (ker M^b,
+cluster by cluster), evaluates kappa^b = <a, M~^b u> + sum_{i<j} M_ij u_i u_j
+and returns c_0 as the minimum-weight chain with that syndrome. It is the
+default of `TQD_runner.run_full_simulation` and `make_twisted_layer_specs`:
+
+| option | twist rules | c_0 |
+|---|---|---|
+| default | Eq. (41) | linking charge |
+| `c0_0_approx=True` | Eq. (41) | 0 |
+| `c0_0_approx=True, legacy_twist_rules=True` | original (bit for bit) | 0 |
+
+The Eq. (41) rules differ from the original ones in one term: read against
+Eq. (41), the original rules place the green flux inconsistently (the
+blue-vertex rule and the red-vertex rule need dual-lattice shifts that differ
+by (1,1,1)), which leaves M^b non-symmetric and kappa^b undefined. linking.py
+keeps the blue-vertex convention (`DUAL_SHIFT`); the red-vertex rule's twisted
+blue edges move by one diagonal step. With PBC the rules also wrap in time.
+cluster/tqd_worker.py stays pinned to the original protocol so that its
+running studies keep one protocol.
+
+Checks (seconds): `python diagnostics/linking_check.py`
+(agreement with the original rules term by term, da = b, symmetry of M^b,
+history independence of kappa, c_0 reproducing kappa, and linked flux loops of
+every colour pair carrying one charge each).
+
+Data generation (cluster/linking_worker.py; experiments `xz` and `x30d` for
+Fig. 8, `pzc` for Fig. 7; L = 9, 11, 13; p_phys = 1.0%..2.9% in 0.05% steps;
+~640 core-hours, ~3.2 h per task on 200 tasks), collect and TikZ figures in
+one submission:
+
+```bash
+bash cluster/linking_submit.sh                       # variant c0 (default)
+VARIANT=c0_0_approx bash cluster/linking_submit.sh   # paired c_0 = 0 control
+bash cluster/linking_track.sh                        # progress, failures, thresholds
+```
+
+Results: `results/linking/<variant>/analysis/fig8_tqd.tex`,
+`fig7_pzc_vs_px.tex` (the design of the referee-round figures), PNG previews,
+`report.txt` (with the published thresholds side by side when
+`results/referee/referee_summary.csv` exists) and `linking_stats.csv` (how
+often c_0 is nonzero, per point and branch).
 
 ## Multi-layer JIT
 

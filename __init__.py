@@ -43,6 +43,16 @@ from .twisted import (
     precompute_twist_masks,
     twisted_delegated_errors,
 )
+from .linking import (
+    LinkingInfo,
+    TwistGeometry,
+    get_geometry,
+    heralded_twist_links,
+    linking_charge_errors,
+    linking_syndrome,
+    sample_history,
+    twisted_z_errors,
+)
 from .runner import (
     ChannelSpec,
     LayerSpec,
@@ -114,6 +124,14 @@ __all__ = [
     "make_twisted_layer_specs",
     "precompute_twist_masks",
     "twisted_delegated_errors",
+    "LinkingInfo",
+    "TwistGeometry",
+    "get_geometry",
+    "heralded_twist_links",
+    "linking_charge_errors",
+    "linking_syndrome",
+    "sample_history",
+    "twisted_z_errors",
     "ChannelSpec",
     "LayerSpec",
     "LayerView",

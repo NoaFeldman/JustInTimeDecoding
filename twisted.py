@@ -7,11 +7,18 @@ Sec. IV, the vectorization masks of the twist rules, and the adapters
 (make_twisted_layer_specs) that plug the model into the general layered runner
 in runner.py. The lattice geometry it builds on is model-independent and lives
 in lattice.py.
+
+The per-vertex rules in this file (generate_twisted_z_errors, get_vertex_edges,
+precompute_twist_masks) are the *legacy* twist rules. The adapters default to
+the Eq. (41) rules and the linking-charge chain c_0 of linking.py, which
+differ from these in one term (the red-vertex rule's green-flux edges, see
+linking.py); pass legacy_twist_rules=True, c0_0_approx=True to reproduce the
+legacy protocol bit for bit.
 """
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import numpy as np
 from pymatching import Matching
@@ -126,27 +133,57 @@ def build_z_correction_matchings_from_x(
 # ---------------------------------------------------------------------------
 
 
-def twisted_delegated_errors(context, parent) -> dict:
+# Histories only enter kappa^b, which does not depend on which one is drawn; a
+# generator of their own keeps numpy's global stream (all the noise) unchanged.
+_HISTORY_RNG = np.random.default_rng(20261016)
+
+
+def twisted_delegated_errors(
+    context,
+    parent,
+    c0_0_approx: bool = False,
+    legacy_twist_rules: bool = False,
+) -> dict:
     """Twisted Z errors delegated into a layer by the X layer below it.
 
     Ground-truth generation (simulation-side, hence it reads the parent's
     residual): the flux loops left by the layer below twist the links around
-    each vertex according to the rules of Fig. 2 of arxiv/2604.02033, each
-    vertex twisting with probability 1/2 (is_full=False). Returned keyed by
-    color, which is also the receiving layer's channel key set.
+    each vertex according to Eq. (41) of arxiv/2604.02033, each vertex twisting
+    with probability 1/2 (linking.twisted_z_errors), and the linking-charge
+    chain c_0 of Algorithm 1, step 5 is added on top (linking.linking_charge_errors).
+    Returned keyed by color, which is also the receiving layer's channel key set.
+
+    c0_0_approx=True leaves c_0 out (Remark 1 of the paper). legacy_twist_rules
+    =True uses the original per-vertex rules (generate_twisted_z_errors with
+    is_full=False) and requires c0_0_approx=True; see linking.py for why.
     """
     if parent.residual is None:
         raise ValueError("twisted_delegated_errors needs the parent residual.")
-    return generate_twisted_z_errors(
-        parent.residual,
-        context.linear_size,
-        context.time_depth,
-        context.edge_lookup,
-        is_full=False,
-    )
+    if legacy_twist_rules:
+        if not c0_0_approx:
+            raise ValueError("legacy_twist_rules=True requires c0_0_approx=True (kappa is undefined there).")
+        return generate_twisted_z_errors(
+            parent.residual,
+            context.linear_size,
+            context.time_depth,
+            context.edge_lookup,
+            is_full=False,
+        )
+    from .linking import get_geometry, linking_charge_errors, twisted_z_errors
+
+    geometry = get_geometry(context.linear_size, context.time_depth, context.boundary)
+    errors = twisted_z_errors(geometry, parent.residual)
+    if c0_0_approx:
+        return errors
+    chains, _info = linking_charge_errors(geometry, parent.residual, context.full_matching, _HISTORY_RNG)
+    if chains is None:
+        # Only a flux winding around periodic time has no c_0; the layered runner
+        # delegates only after the X layer passed its logical check.
+        raise RuntimeError("linking charge undefined for this residual (flux winding around periodic time)")
+    return {color: errors[color] ^ chains[color] for color in errors}
 
 
-def completing_the_loop_herald(context, parent) -> dict:
+def completing_the_loop_herald(context, parent, legacy_twist_rules: bool = False) -> dict:
     """Completing-the-Loop heralding: the links the Z decoder gets for free.
 
     Sec. IV of arxiv/2604.02033. The decoder cannot see which loops the layer
@@ -167,6 +204,12 @@ def completing_the_loop_herald(context, parent) -> dict:
         color: (parent.correction[color] ^ parent.global_correction[color]).astype(np.uint8)
         for color in COLORS
     }
+    if not legacy_twist_rules:
+        from .linking import get_geometry, heralded_twist_links
+
+        return heralded_twist_links(
+            get_geometry(context.linear_size, context.time_depth, context.boundary), correction_delta
+        )
     return generate_twisted_z_errors(
         correction_delta,
         context.linear_size,
@@ -183,8 +226,16 @@ def make_twisted_layer_specs(
     num_layers: int = 2,
     commit=None,
     final_commit=None,
+    c0_0_approx: bool = False,
+    legacy_twist_rules: bool = False,
 ):
     """The twisted quantum double stack, as the general runner wants it.
+
+    c0_0_approx / legacy_twist_rules are passed to twisted_delegated_errors and
+    completing_the_loop_herald: by default the Eq. (41) rules plus the
+    linking-charge chain c_0; c0_0_approx=True drops c_0 (the published
+    protocol's Remark 1); legacy_twist_rules=True (with c0_0_approx=True)
+    reproduces the original rules bit for bit.
 
     The model of arxiv/2604.02033 is the default two-layer stack:
 
@@ -214,6 +265,10 @@ def make_twisted_layer_specs(
 
     if commit is None:
         commit = classic_commit
+    if legacy_twist_rules and not c0_0_approx:
+        raise ValueError("legacy_twist_rules=True requires c0_0_approx=True (kappa is undefined there).")
+    delegate = partial(twisted_delegated_errors, c0_0_approx=c0_0_approx, legacy_twist_rules=legacy_twist_rules)
+    herald = partial(completing_the_loop_herald, legacy_twist_rules=legacy_twist_rules)
 
     def channels(error_type: str):
         check = z2_logical_error(error_type)
@@ -242,8 +297,8 @@ def make_twisted_layer_specs(
                 channels=channels("z"),
                 noise_probability=physical_error_rate,
                 decoding="global" if layer_index == num_layers - 1 else "jit",
-                generate_delegated_errors=twisted_delegated_errors,
-                herald_links=completing_the_loop_herald if heralded else None,
+                generate_delegated_errors=delegate,
+                herald_links=herald if heralded else None,
                 commit=commit,
                 final_commit=final_commit,
             )

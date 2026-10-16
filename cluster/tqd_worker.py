@@ -527,6 +527,10 @@ def run_group_chunk(
     since_checkpoint = 0
 
     # Layer specs are cheap dataclasses; build them once per p, outside the loop.
+    # The studies of this worker were started with the legacy twist rules and
+    # c_0 = 0; they stay pinned to them so that resumed chunks keep one protocol
+    # (make_twisted_layer_specs now defaults to the Eq. (41) rules + c_0, see
+    # linking.py and cluster/linking_worker.py).
     commit_fn, final_commit_fn = commit_function(commit, context)
     specs_by_p = [
         make_twisted_layer_specs(
@@ -535,6 +539,8 @@ def run_group_chunk(
             num_layers=NUM_LAYERS,
             commit=commit_fn,
             final_commit=final_commit_fn,
+            c0_0_approx=True,
+            legacy_twist_rules=True,
         )
         for probability in P_VALUES
     ]
